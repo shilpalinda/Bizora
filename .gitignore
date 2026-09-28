@@ -1,0 +1,8 @@
+node_modules/
+dist/
+backup/
+bizora.zip
+EGMORE_Expenditure_Extracted.xlsx
+.env
+.env.*
+!.env.example
