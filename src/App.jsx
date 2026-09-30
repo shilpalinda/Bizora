@@ -3,8 +3,8 @@ import * as XLSX from 'xlsx';
 
 const appointments = [];
 
-const navItems = [['Dashboard', '⌂'], ['Appointments', '◷'], ['Clients', '◌'], ['Memberships', '◎'], ['Services', '✦'], ['Staff', '♙'], ['Daily Report', '▤'], ['Monthly Report', '◒'], ['Expenditure', '↘'], ['Reports', '▥'], ['Targets', '◎'], ['Settings', '⚙']];
-const frontdeskNavItems = [['Appointments', '◷'], ['Daily Receipts', '▤'], ['Monthly Report', '◒'], ['Daily Payments', '↘'], ['Clients', '◌'], ['Membership', '◎'], ['Staff', '♙'], ['Services', '✦']];
+const navItems = [['Dashboard', '⌂'], ['Appointments', '◷'], ['Daily Receipts', '▤'], ['Daily Payments (Exp)', '↘'], ['Membership Plan', '◎'], ['Settings', '⚙'], ['Client Directory', '◌'], ['Team', '♙'], ['Menu', '✦'], ['Report(s)', '▥', 'section'], ['Daily Report', '▤', 'sub'], ['Monthly Report', '◒', 'sub']];
+const frontdeskNavItems = [['Appointments', '◷'], ['Daily Receipts', '▤'], ['Daily Payments (Exp)', '↘'], ['Membership Plan', '◎'], ['Settings', '⚙'], ['Client Directory', '◌'], ['Team', '♙'], ['Menu', '✦'], ['Report(s)', '▥', 'section'], ['Daily Report', '▤', 'sub'], ['Monthly Report', '◒', 'sub']];
 const USERS = {
   'frontdesk@bizora.com': { role: 'Frontdesk', password: 'bizora' },
   'manager@bizora.com': { role: 'Manager', password: 'bizora' },
@@ -20,7 +20,17 @@ const STORAGE = {
   staff: 'bizora-staff',
   clients: 'bizora-clients',
   memberships: 'bizora-memberships',
-  nextMemberId: 'bizora-next-member-id'
+  nextMemberId: 'bizora-next-member-id',
+  monthlyTargets: 'bizora-monthly-targets',
+  eodReports: 'bizora-eod-reports',
+  whatsappNumber: 'bizora-whatsapp-number',
+  businessProfile: 'bizora-business-profile',
+  preferences: 'bizora-preferences',
+  membershipPackages: 'bizora-membership-packages',
+  membershipVisits: 'bizora-membership-visits',
+  staffAttendance: 'bizora-staff-attendance',
+  dailyRows: 'bizora-daily-rows',
+  dailyExpenses: 'bizora-daily-expenses'
 };
 const membershipDurations = ['1 Month', '3 Months', '6 Months', '1 Year'];
 const membershipBranches = ['Main Branch'];
@@ -73,6 +83,10 @@ const getInitialAppointments = (baseDate) => [
   { id: 'APT-1008', date: addDaysISO(baseDate, 1), inTime: '15:30', outTime: '16:15', client: 'Deepa Rao', phone: '9876543222', service: 'Hair Cut', staff: 'Anu', duration: '45 min', status: 'Upcoming', completed: false, colorTag: 'default', payment: 'Pending', notes: 'Styling' }
 ];
 
+const API_BASE = `${window.location.protocol}//${window.location.hostname}:4000/api`;
+const NEXT_RECEIPT_NUMBER_KEY = 'salon-next-receipt-number-v2';
+const SYNCED_FLAG_KEY = 'bizora-synced-from-server';
+
 const loadJSON = (key, fallback) => {
   try {
     const value = window.localStorage.getItem(key);
@@ -81,7 +95,24 @@ const loadJSON = (key, fallback) => {
     return fallback;
   }
 };
-const saveJSON = (key, value) => window.localStorage.setItem(key, JSON.stringify(value));
+// Writes go to localStorage immediately (fast, offline-safe) and to Postgres in the background.
+const saveJSON = (key, value) => {
+  window.localStorage.setItem(key, JSON.stringify(value));
+  fetch(`${API_BASE}/state/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value })
+  }).catch(() => { /* backend offline — app keeps working from localStorage */ });
+};
+const fetchAllServerState = async () => {
+  try {
+    const response = await fetch(`${API_BASE}/state`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+};
 const toISODate = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const todayISO = () => toISODate(new Date());
 const addDaysISO = (iso, days) => {
@@ -89,15 +120,34 @@ const addDaysISO = (iso, days) => {
   date.setDate(date.getDate() + days);
   return toISODate(date);
 };
+const addMonthsISO = (iso, months) => {
+  const date = new Date(`${iso}T00:00:00`);
+  date.setMonth(date.getMonth() + Number(months || 0));
+  return toISODate(date);
+};
+const getMembershipStatus = (membership) => {
+  if (membership.cancelled) return 'Cancelled';
+  if ((membership.usedSessions || 0) >= membership.sessions) return 'Sessions Completed';
+  if (membership.expiryDate && membership.expiryDate < todayISO()) return 'Expired';
+  return 'Active';
+};
+const canRedeemSession = (membership) => getMembershipStatus(membership) === 'Active' && (membership.sessions - (membership.usedSessions || 0)) > 0;
 const formatDisplayDate = (iso) => new Date(`${iso}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 const sanitizePhone = (value) => value.replace(/\D/g, '').slice(0, 10);
 const routeFor = (label) => {
-  if (label === 'Daily Report' || label === 'Daily Receipts') return 'Receipts';
+  if (label === 'Daily Receipts') return 'Receipts';
+  if (label === 'Daily Report') return 'EOD Reports';
   if (label === 'Monthly Report') return 'Daily Receipts';
-  if (label === 'Daily Payments') return 'Expenditure';
-  if (label === 'Membership') return 'Memberships';
+  if (label === 'Daily Payments (Exp)' || label === 'Daily Payments') return 'Expenditure';
+  if (label === 'Membership Plan' || label === 'Membership') return 'Memberships';
+  if (label === 'Target Set Up' || label === 'Target Setup' || label === 'Settings') return 'Targets';
+  if (label === 'Client Directory') return 'Clients';
+  if (label === 'Team') return 'Staff';
+  if (label === 'Menu') return 'Services';
   return label;
 };
+const getMonthKey = (dateISO) => (dateISO || todayISO()).slice(0, 7);
+const formatMonthLabel = (monthKey) => new Date(`${monthKey}-01T00:00:00`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 const chartBars = [0, 0, 0, 0, 0, 0];
 const expenseBreakdown = [];
 const paymentRows = [];
@@ -114,6 +164,13 @@ const defaultStaff = [
   { id: 3, name: 'Anu', phone: '9876543213', role: 'Hair Specialist' },
   { id: 4, name: 'Kavya', phone: '9876543214', role: 'Nail Technician' }
 ];
+const defaultBusinessProfile = { name: 'Bizora', tagline: 'Business manager', phone: '', gstNumber: '', address: '', openTime: '09:00', closeTime: '20:00' };
+const defaultPreferences = { defaultTaxRate: '5', defaultTowelKitFee: '0', lowCashAlert: '5000' };
+const defaultMembershipPackages = [
+  { id: 1, name: 'Basic 8', sessions: 8, price: 12000, validityMonths: 6, active: true, notes: '' },
+  { id: 2, name: 'Premium 10', sessions: 10, price: 15000, validityMonths: 6, active: true, notes: '' },
+  { id: 3, name: 'Gold 15', sessions: 15, price: 20000, validityMonths: 12, active: true, notes: '' }
+];
 const receiptServices = defaultServices.map((service) => [service.name, service.staff, service.price]);
 const appointmentServices = defaultServices.map((service) => [service.name, service.staff, service.duration]);
 const initialDailyReceipts = [
@@ -127,6 +184,43 @@ const initialDailyReceipts = [
 ];
 const initialDailyExpenses = [];
 const money = (value) => `₹${Math.round(value || 0).toLocaleString('en-IN')}`;
+const buildProgressBar = (achieved, target, slots = 10) => {
+  if (!target) return '░'.repeat(slots) + ' 0%';
+  const ratio = Math.max(0, Math.min(1, achieved / target));
+  const filled = Math.round(ratio * slots);
+  return `${'█'.repeat(filled)}${'░'.repeat(slots - filled)} ${Math.round(ratio * 100)}%`;
+};
+const buildEodMessage = (report, businessName = 'Bizora') => [
+  `🌸 *${businessName.toUpperCase()} — END OF DAY REPORT* 🌸`,
+  `📅 ${report.day}`,
+  '━━━━━━━━━━━━━━━━━━',
+  '💰 *RECEIPTS*',
+  `Opening balance: ${money(report.openingBalance)}`,
+  `Cash: ${money(report.cash)}`,
+  `Card: ${money(report.card)}`,
+  `GPay: ${money(report.gpay)}`,
+  `*Total receipts: ${money(report.receiptsSubtotal)}*`,
+  `Towel cash: - ${money(report.towelCash)}`,
+  `*Receipts after towel cash: ${money(report.receiptsAfterTowel)}*`,
+  '',
+  '� *PAYMENTS*',
+  `Expenses for the day: ${money(report.paymentsForDay)}`,
+  '',
+  '🏦 *CLOSING BALANCE*',
+  `*${money(report.closingBalance)}*`,
+  '━━━━━━━━━━━━━━━━━━',
+  '🎯 *MONTHLY TARGET*',
+  `Target: ${money(report.targetAmount)}`,
+  `Achieved so far: ${money(report.achievedSoFar)}`,
+  buildProgressBar(report.achievedSoFar, report.targetAmount),
+  '━━━━━━━━━━━━━━━━━━',
+  '👥 *CLIENT FOOTFALL*',
+  `Total clients served: ${report.totalClientsServed}`,
+  `Regular paid clients: ${report.regularPaidClients}`,
+  `Number of membership clients: ${report.membershipClientsServed}`,
+  '━━━━━━━━━━━━━━━━━━',
+  `✅ Closed by ${report.closedBy} · ${new Date(report.closedAt).toLocaleString('en-IN')}`
+].join('\n');
 
 function MonthlyStatement({ snapshots, totalReceipts, totalPayments, closingBalance }) {
   return <section className="panel monthly-statement"><div className="panel-header"><div><p className="panel-kicker">Monthly transaction snapshot</p><h2>Daily balances</h2></div><span className="form-status">{snapshots.length} days</span></div><div className="monthly-table-wrap"><table className="excel-table monthly-snapshot-table"><thead><tr><th>Date</th><th>Opening Balance</th><th>Total Receipts</th><th>Total Payments</th><th>Closing Balance</th></tr></thead><tbody>{snapshots.map((snapshot) => <tr key={snapshot.date}><td><strong>{snapshot.date}</strong></td><td>{money(snapshot.openingBalance)}</td><td>{money(snapshot.receipts)}</td><td>{money(snapshot.payments)}</td><td><strong>{money(snapshot.closingBalance)}</strong></td></tr>)}</tbody></table></div><div className="monthly-total-grid"><article><span>Total Receipts</span><strong>{money(totalReceipts)}</strong><small>For selected date range</small></article><article><span>Total Payments</span><strong>{money(totalPayments)}</strong><small>Expenses and cashouts</small></article><article className="monthly-final"><span>Closing Balance</span><strong>{money(closingBalance)}</strong><small>Balance at end of selected range</small></article></div></section>;
@@ -155,11 +249,11 @@ function App() {
   const [search, setSearch] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('GPay / UPI');
   const [notice, setNotice] = useState('');
-  const [receipt, setReceipt] = useState(() => ({ client: '', phone: '', date: loadJSON(STORAGE.businessDate, null) || todayISO(), discount: '0', tax: '5', memberFee: '0', towelKit: '0', notes: '' }));
+  const [receipt, setReceipt] = useState(() => { const prefs = loadJSON(STORAGE.preferences, defaultPreferences); return { client: '', phone: '', date: loadJSON(STORAGE.businessDate, null) || todayISO(), discount: '0', tax: prefs.defaultTaxRate, memberFee: '0', towelKit: prefs.defaultTowelKitFee, notes: '' }; });
   const [receiptItems, setReceiptItems] = useState([{ id: 1, service: 'Swedish Massage', staff: 'Meena', quantity: 1, price: 2000 }]);
   const [receiptError, setReceiptError] = useState('');
   const [savedReceipt, setSavedReceipt] = useState(null);
-  const [nextReceiptNumber, setNextReceiptNumber] = useState(() => Number(window.localStorage.getItem('salon-next-receipt-number-v2')) || 1);
+  const [nextReceiptNumber, setNextReceiptNumber] = useState(() => Number(window.localStorage.getItem(NEXT_RECEIPT_NUMBER_KEY)) || 1);
   const [selectedAppointmentDate, setSelectedAppointmentDate] = useState(() => {
     return loadJSON(STORAGE.businessDate, null) || todayISO();
   });
@@ -200,23 +294,79 @@ function App() {
   const [staffList, setStaffList] = useState(() => loadJSON(STORAGE.staff, defaultStaff));
   const [showStaffForm, setShowStaffForm] = useState(false);
   const [staffForm, setStaffForm] = useState({ name: '', phone: '', role: 'Therapist' });
+  const [staffAttendance, setStaffAttendance] = useState(() => loadJSON(STORAGE.staffAttendance, {}));
+  const [attendanceDate, setAttendanceDate] = useState(() => loadJSON(STORAGE.businessDate, null) || todayISO());
   const [memberships, setMemberships] = useState(() => loadJSON(STORAGE.memberships, []));
-  const [membershipForm, setMembershipForm] = useState({ name: '', phone: '', branch: membershipBranches[0], packageName: '', duration: membershipDurations[0], amount: '15000', sessions: '8', paymentMode: 'Cash', startDate: '2026-09-24', notes: '' });
+  const [membershipPackages, setMembershipPackages] = useState(() => loadJSON(STORAGE.membershipPackages, defaultMembershipPackages));
+  const [membershipVisits, setMembershipVisits] = useState(() => loadJSON(STORAGE.membershipVisits, []));
+  const [packageForm, setPackageForm] = useState({ name: '', sessions: '8', price: '12000', validityMonths: '6', notes: '' });
+  const [editingPackageId, setEditingPackageId] = useState(null);
+  const [packageError, setPackageError] = useState('');
+  const activeMembershipPackages = membershipPackages.filter((pkg) => pkg.active);
+  const [membershipForm, setMembershipForm] = useState({ name: '', phone: '', branch: membershipBranches[0], packageId: activeMembershipPackages[0]?.id || '', paymentMode: 'Cash', startDate: loadJSON(STORAGE.businessDate, null) || todayISO(), notes: '' });
   const [membershipError, setMembershipError] = useState('');
   const [membershipSearch, setMembershipSearch] = useState('');
-  const [receiptMembership, setReceiptMembership] = useState(false);
-  const [receiptMembershipForm, setReceiptMembershipForm] = useState({ branch: membershipBranches[0], packageName: '', duration: membershipDurations[0], sessions: '8' });
-  const [dailyRows, setDailyRows] = useState([]);
-  const [dailyExpenses, setDailyExpenses] = useState(initialDailyExpenses);
+  const [savedMembership, setSavedMembership] = useState(null);
+  const [membershipLookupPhone, setMembershipLookupPhone] = useState('');
+  const [redeemForm, setRedeemForm] = useState({ membershipId: null, service: defaultServices[0]?.name || '', staff: defaultStaff[0]?.name || '', notes: '' });
+  const [savedMembershipVisit, setSavedMembershipVisit] = useState(null);
+  const [dailyRows, setDailyRows] = useState(() => loadJSON(STORAGE.dailyRows, []));
+  const [dailyExpenses, setDailyExpenses] = useState(() => loadJSON(STORAGE.dailyExpenses, initialDailyExpenses));
   const [dailyFrom, setDailyFrom] = useState('2026-08-09');
   const [dailyTo, setDailyTo] = useState('2026-08-15');
   const [dailyForm, setDailyForm] = useState({ date: '2026-08-16', cash: '', card: '', gpay: '', memberFee: '', memberCount: '', clientCount: '', towelKit: '' });
   const [expenseForm, setExpenseForm] = useState({ date: loadJSON(STORAGE.businessDate, null) || todayISO(), narration: '', amount: '', source: 'Cash' });
   const [expenseError, setExpenseError] = useState('');
+  const [monthlyTargets, setMonthlyTargets] = useState(() => loadJSON(STORAGE.monthlyTargets, { [getMonthKey(todayISO())]: { target: 20000000, achievedBaseline: 17000000 } }));
+  const [targetForm, setTargetForm] = useState(() => ({ month: getMonthKey(loadJSON(STORAGE.businessDate, null) || todayISO()), amount: '', baseline: '' }));
+  const [targetError, setTargetError] = useState('');
+  const [eodReports, setEodReports] = useState(() => loadJSON(STORAGE.eodReports, []));
+  const [selectedEodReportId, setSelectedEodReportId] = useState(null);
+  const [whatsappNumber, setWhatsappNumber] = useState(() => loadJSON(STORAGE.whatsappNumber, ''));
+  const [whatsappNumberDraft, setWhatsappNumberDraft] = useState(() => loadJSON(STORAGE.whatsappNumber, ''));
+  const [businessProfile] = useState(() => loadJSON(STORAGE.businessProfile, defaultBusinessProfile));
+  const [preferences] = useState(() => loadJSON(STORAGE.preferences, defaultPreferences));
+  const [restoreError, setRestoreError] = useState('');
 
   useEffect(() => {
     const interval = window.setInterval(() => setClockTick((tick) => tick + 1), 30000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => { saveJSON(STORAGE.dailyRows, dailyRows); }, [dailyRows]);
+  useEffect(() => { saveJSON(STORAGE.dailyExpenses, dailyExpenses); }, [dailyExpenses]);
+
+  // One-time bootstrap: pull the latest saved state from Postgres (if reachable) so a second
+  // device/browser sees the same data. Falls back to whatever is already in localStorage.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const serverState = await fetchAllServerState();
+      if (!serverState || cancelled) return;
+      const syncKeys = [...Object.values(STORAGE), NEXT_RECEIPT_NUMBER_KEY];
+      const hasServerData = syncKeys.some((key) => serverState[key] !== undefined && serverState[key] !== null);
+      if (!hasServerData) {
+        syncKeys.forEach((key) => {
+          const raw = window.localStorage.getItem(key);
+          if (raw === null) return;
+          try { saveJSON(key, JSON.parse(raw)); } catch { /* skip malformed local value */ }
+        });
+        return;
+      }
+      if (window.sessionStorage.getItem(SYNCED_FLAG_KEY)) return;
+      let changed = false;
+      syncKeys.forEach((key) => {
+        if (serverState[key] === undefined || serverState[key] === null) return;
+        const nextRaw = JSON.stringify(serverState[key]);
+        if (window.localStorage.getItem(key) !== nextRaw) {
+          window.localStorage.setItem(key, nextRaw);
+          changed = true;
+        }
+      });
+      window.sessionStorage.setItem(SYNCED_FLAG_KEY, '1');
+      if (changed) window.location.reload();
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const appointmentsForSelectedDate = useMemo(() => {
@@ -260,7 +410,7 @@ function App() {
 
   const receiptSubtotal = receiptItems.reduce((total, item) => total + item.quantity * item.price, 0);
   const receiptDiscount = Math.min(receiptSubtotal, Math.max(0, Number(receipt.discount) || 0));
-  const receiptTax = Math.round((receiptSubtotal - receiptDiscount) * ((Number(receipt.tax) || 0) / 100));
+  const receiptTax = paymentMethod === 'Cash' ? 0 : Math.round((receiptSubtotal - receiptDiscount) * ((Number(receipt.tax) || 0) / 100));
   const receiptTotal = receiptSubtotal - receiptDiscount + receiptTax;
 
   const updateReceipt = (field, value) => setReceipt((current) => ({ ...current, [field]: value }));
@@ -268,9 +418,9 @@ function App() {
   const addReceiptItem = () => setReceiptItems((items) => [...items, { id: Date.now(), service: 'Facial', staff: 'Priya', quantity: 1, price: 1500 }]);
   const removeReceiptItem = (id) => setReceiptItems((items) => items.length === 1 ? items : items.filter((item) => item.id !== id));
   const allocateReceiptNumber = () => {
-    const currentNumber = Number(window.localStorage.getItem('salon-next-receipt-number-v2')) || nextReceiptNumber || 1;
+    const currentNumber = Number(window.localStorage.getItem(NEXT_RECEIPT_NUMBER_KEY)) || nextReceiptNumber || 1;
     const nextNumber = currentNumber + 1;
-    window.localStorage.setItem('salon-next-receipt-number-v2', String(nextNumber));
+    saveJSON(NEXT_RECEIPT_NUMBER_KEY, nextNumber);
     setNextReceiptNumber(nextNumber);
     return `REC-${String(currentNumber).padStart(5, '0')}`;
   };
@@ -280,7 +430,6 @@ function App() {
     if (closedDates.includes(entryDate)) { setReceiptError('This day is closed. Open the next working date to enter receipts.'); return; }
     if (!receipt.client.trim()) { setReceiptError('Enter the client name before saving the receipt.'); return; }
     if (!receiptItems.length || receiptItems.some((item) => !item.service || item.price <= 0)) { setReceiptError('Add at least one service with a valid amount.'); return; }
-    if (receiptMembership && (receipt.phone.replace(/\D/g, '').length !== 10 || Number(receiptMembershipForm.sessions) <= 0)) { setReceiptError('Enter a valid phone number and session count to add a membership.'); return; }
     const receiptNumber = allocateReceiptNumber();
     const receiptBase = receiptSubtotal - receiptDiscount;
     const receiptPayment = paymentMethod === 'Card' ? { cash: 0, card: receiptBase, cardGst: receiptTax, gpay: 0, gpayGst: 0 } : paymentMethod === 'GPay / UPI' ? { cash: 0, card: 0, cardGst: 0, gpay: receiptBase, gpayGst: receiptTax } : { cash: receiptBase, card: 0, cardGst: 0, gpay: 0, gpayGst: 0 };
@@ -314,15 +463,10 @@ function App() {
     if (entryDate < dailyFrom || entryDate > dailyTo) { setDailyFrom(entryDate); setDailyTo(entryDate); }
     setSavedReceipt({ number: receiptNumber, total: receiptTotal, client: entry.client, method: paymentMethod });
     if (entry.phone) addClientRecord(entry.client, entry.phone);
-    if (receiptMembership) {
-      addMembershipRecord({ name: entry.client, phone: entry.phone, branch: receiptMembershipForm.branch, packageName: receiptMembershipForm.packageName, duration: receiptMembershipForm.duration, amount: entry.memberFee, sessions: receiptMembershipForm.sessions, paymentMode: paymentMethod, startDate: entryDate, notes: '' });
-    }
-    setReceipt({ client: '', phone: '', date: entryDate, discount: '0', tax: '5', memberFee: '0', towelKit: '0', notes: '' });
+    setReceipt({ client: '', phone: '', date: entryDate, discount: '0', tax: preferences.defaultTaxRate, memberFee: '0', towelKit: preferences.defaultTowelKitFee, notes: '' });
     setReceiptItems([{ id: Date.now() + 2, service: 'Swedish Massage', staff: 'Meena', quantity: 1, price: 2000 }]);
     setReceiptError('');
-    setReceiptMembership(false);
-    setReceiptMembershipForm({ branch: membershipBranches[0], packageName: '', duration: membershipDurations[0], sessions: '8' });
-    showNotice(receiptMembership ? `${receiptNumber} saved and membership added` : `${receiptNumber} saved`);
+    showNotice(`${receiptNumber} saved`);
   };
   const deleteReceiptEntry = (id) => {
     const entry = receiptEntries.find((item) => item.id === id);
@@ -357,12 +501,143 @@ function App() {
     }));
     showNotice(`${entry.number} deleted`);
   };
+  const getMonthlyTarget = (monthKey) => monthlyTargets[monthKey]?.target || 0;
+  const getMonthlyBaseline = (monthKey) => monthlyTargets[monthKey]?.achievedBaseline || 0;
+  const receiptEntryTotal = (entry) => (entry.cash || 0) + (entry.card || 0) + (entry.gpay || 0) + (entry.memberFee || 0);
+  const achievedForMonth = (monthKey, uptoDateInclusive) => getMonthlyBaseline(monthKey) + receiptEntries
+    .filter((entry) => entry.date.startsWith(monthKey) && entry.date <= uptoDateInclusive)
+    .reduce((total, entry) => total + receiptEntryTotal(entry), 0);
+  const achievedBeforeDate = (monthKey, dateISO) => getMonthlyBaseline(monthKey) + receiptEntries
+    .filter((entry) => entry.date.startsWith(monthKey) && entry.date < dateISO)
+    .reduce((total, entry) => total + receiptEntryTotal(entry), 0);
+  const saveMonthlyTarget = (event) => {
+    event.preventDefault();
+    const amount = Number(targetForm.amount);
+    const baseline = Number(targetForm.baseline) || 0;
+    if (!targetForm.month || amount <= 0) { setTargetError('Choose a month and enter a target amount greater than zero.'); return; }
+    const nextTargets = { ...monthlyTargets, [targetForm.month]: { target: amount, achievedBaseline: baseline } };
+    setMonthlyTargets(nextTargets);
+    saveJSON(STORAGE.monthlyTargets, nextTargets);
+    setTargetForm((form) => ({ ...form, amount: '', baseline: '' }));
+    setTargetError('');
+    showNotice(`Target for ${formatMonthLabel(targetForm.month)} saved`);
+  };
+  const deleteMonthlyTarget = (monthKey) => {
+    if (!window.confirm(`Remove the target for ${formatMonthLabel(monthKey)}?`)) return;
+    const nextTargets = { ...monthlyTargets };
+    delete nextTargets[monthKey];
+    setMonthlyTargets(nextTargets);
+    saveJSON(STORAGE.monthlyTargets, nextTargets);
+  };
+  const sendEodReport = (id) => {
+    const report = eodReports.find((item) => item.id === id);
+    if (!report) return;
+    const numbers = whatsappNumber.split(',').map((value) => value.replace(/\D/g, '')).filter((digits) => digits.length >= 10);
+    if (!numbers.length) {
+      showNotice('Add a WhatsApp number in Settings before sending.');
+      setPage('Targets');
+      return;
+    }
+    const message = buildEodMessage(report, businessProfile.name);
+    numbers.forEach((digits) => window.open(`https://wa.me/${digits}?text=${encodeURIComponent(message)}`, '_blank'));
+    const nextReports = eodReports.map((item) => item.id === id ? { ...item, sent: true, sentAt: new Date().toISOString() } : item);
+    setEodReports(nextReports);
+    saveJSON(STORAGE.eodReports, nextReports);
+    showNotice(`WhatsApp opened for ${numbers.length} ${numbers.length === 1 ? 'number' : 'numbers'} — press Send inside WhatsApp to deliver it.`);
+  };
+  const saveWhatsappNumber = (event) => {
+    event.preventDefault();
+    setWhatsappNumber(whatsappNumberDraft);
+    saveJSON(STORAGE.whatsappNumber, whatsappNumberDraft);
+    showNotice('WhatsApp number saved');
+  };
+  const backupAllData = () => {
+    const data = Object.fromEntries(Object.entries(STORAGE).map(([key, storageKey]) => [key, loadJSON(storageKey, null)]));
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `bizora-backup-${todayISO()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    showNotice('Backup file downloaded');
+  };
+  const restoreAllData = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        Object.entries(STORAGE).forEach(([key, storageKey]) => {
+          if (data[key] !== undefined && data[key] !== null) saveJSON(storageKey, data[key]);
+        });
+        setRestoreError('');
+        showNotice('Data restored. Reloading…');
+        window.setTimeout(() => window.location.reload(), 900);
+      } catch {
+        setRestoreError('That file could not be read. Choose a valid Bizora backup JSON file.');
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+  };
   const closeBusinessDay = () => {
     if (closedDates.includes(businessDate)) {
       showNotice('This day is already closed.');
       return;
     }
     if (!window.confirm(`Close ${formatDisplayDate(businessDate)}? After closing you cannot change receipts for this day.`)) return;
+    const todayEntries = receiptEntries.filter((entry) => entry.date === businessDate);
+    const priorReceiptsNet = receiptEntries.filter((entry) => entry.date < businessDate).reduce((total, entry) => total + receiptEntryTotal(entry) - (entry.towelKit || 0), 0);
+    const priorExpenses = dailyExpenses.filter((item) => item.date < businessDate).reduce((total, item) => total + item.amount, 0);
+    const openingBalance = priorReceiptsNet - priorExpenses;
+    const cash = todayEntries.reduce((total, entry) => total + (entry.cash || 0), 0);
+    const card = todayEntries.reduce((total, entry) => total + (entry.card || 0), 0);
+    const gpay = todayEntries.reduce((total, entry) => total + (entry.gpay || 0), 0);
+    const memberFee = todayEntries.reduce((total, entry) => total + (entry.memberFee || 0), 0);
+    const receiptsSubtotal = cash + card + gpay;
+    const paymentsForDay = dailyExpenses.filter((item) => item.date === businessDate).reduce((total, item) => total + item.amount, 0);
+    const towelCash = todayEntries.reduce((total, entry) => total + (entry.towelKit || 0), 0);
+    const receiptsAfterTowel = receiptsSubtotal - towelCash;
+    const closingBalance = openingBalance + receiptsAfterTowel - paymentsForDay;
+    const regularPaidClients = todayEntries.length;
+    const todayMembershipVisits = membershipVisits.filter((visit) => visit.date === businessDate);
+    const membershipClientsServed = new Set(todayMembershipVisits.map((visit) => visit.membershipId)).size;
+    const membershipSessionsUsed = todayMembershipVisits.length;
+    const membershipRevenueToday = memberships.filter((m) => m.startDate === businessDate).reduce((total, m) => total + m.amount, 0);
+    const totalClientsServed = regularPaidClients + membershipClientsServed;
+    const monthKey = getMonthKey(businessDate);
+    const targetAmount = getMonthlyTarget(monthKey);
+    const achievedSoFar = achievedForMonth(monthKey, businessDate);
+    const report = {
+      id: Date.now(),
+      date: businessDate,
+      day: formatDisplayDate(businessDate),
+      openingBalance,
+      cash, card, gpay,
+      receiptsSubtotal,
+      receiptsAfterTowel,
+      memberFee,
+      paymentsForDay,
+      towelCash,
+      closingBalance,
+      totalClientsServed,
+      regularPaidClients,
+      membershipClientsServed,
+      membershipSessionsUsed,
+      membershipRevenueToday,
+      monthKey,
+      targetAmount,
+      achievedSoFar,
+      sent: false,
+      sentAt: null,
+      closedBy: userEmail || userRole,
+      closedAt: new Date().toISOString()
+    };
+    const nextReports = [report, ...eodReports];
+    setEodReports(nextReports);
+    saveJSON(STORAGE.eodReports, nextReports);
     const nextClosed = [...closedDates, businessDate];
     const nextDate = addDaysISO(businessDate, 1);
     setClosedDates(nextClosed);
@@ -373,7 +648,7 @@ function App() {
     setReceipt((current) => ({ ...current, date: nextDate }));
     setAppointment((current) => ({ ...current, date: nextDate }));
     setExpenseForm((current) => ({ ...current, date: nextDate }));
-    showNotice(`Day closed. Now working on ${formatDisplayDate(nextDate)}`);
+    showNotice(`Day closed. End of day report saved. Now working on ${formatDisplayDate(nextDate)}`);
   };
   const updateAppointment = (field, value) => setAppointment((current) => ({ ...current, [field]: value }));
   const updateAppointmentTime = (field, value) => setAppointment((current) => {
@@ -664,25 +939,49 @@ function App() {
     saveJSON(STORAGE.staff, nextStaff);
     showNotice('Staff removed');
   };
+  const markAttendance = (staffId, status) => {
+    setStaffAttendance((current) => {
+      const dayRecord = { ...(current[attendanceDate] || {}) };
+      if (dayRecord[staffId] === status) delete dayRecord[staffId];
+      else dayRecord[staffId] = status;
+      const next = { ...current, [attendanceDate]: dayRecord };
+      saveJSON(STORAGE.staffAttendance, next);
+      return next;
+    });
+  };
+  const attendanceForDate = staffAttendance[attendanceDate] || {};
+  const attendanceSummary = staffList.reduce((totals, member) => {
+    const status = attendanceForDate[member.id];
+    if (status === 'Present') totals.present += 1;
+    else if (status === 'Half Day') totals.halfDay += 1;
+    else if (status === 'Absent') totals.absent += 1;
+    else totals.unmarked += 1;
+    return totals;
+  }, { present: 0, halfDay: 0, absent: 0, unmarked: 0 });
   const allocateMemberId = () => {
     const currentNumber = Number(window.localStorage.getItem(STORAGE.nextMemberId)) || 1;
-    window.localStorage.setItem(STORAGE.nextMemberId, String(currentNumber + 1));
+    saveJSON(STORAGE.nextMemberId, currentNumber + 1);
     return `MEM-${String(currentNumber).padStart(4, '0')}`;
   };
   const addMembershipRecord = (details) => {
+    const pkg = membershipPackages.find((item) => item.id === Number(details.packageId));
+    const startDate = details.startDate || todayISO();
     const record = {
       id: Date.now() + Math.random(),
       memberId: allocateMemberId(),
       name: details.name.trim(),
       phone: details.phone.trim(),
       branch: details.branch || membershipBranches[0],
-      packageName: details.packageName || '',
-      duration: details.duration || membershipDurations[0],
-      amount: Number(details.amount) || 0,
-      sessions: Number(details.sessions) || 0,
+      packageId: pkg?.id || null,
+      packageName: pkg?.name || details.packageName || '',
+      validityMonths: pkg?.validityMonths || 0,
+      amount: pkg?.price || Number(details.amount) || 0,
+      sessions: pkg?.sessions || Number(details.sessions) || 0,
       usedSessions: 0,
       paymentMode: details.paymentMode || 'Cash',
-      startDate: details.startDate || todayISO(),
+      startDate,
+      expiryDate: pkg ? addMonthsISO(startDate, pkg.validityMonths) : startDate,
+      cancelled: false,
       notes: details.notes || ''
     };
     setMemberships((records) => {
@@ -695,22 +994,86 @@ function App() {
   };
   const saveMembership = (event) => {
     event.preventDefault();
-    const sessionTotal = Number(membershipForm.sessions);
-    const amount = Number(membershipForm.amount);
-    if (!membershipForm.name.trim() || membershipForm.phone.replace(/\D/g, '').length !== 10 || amount <= 0 || sessionTotal <= 0) {
-      setMembershipError('Enter client details, a valid amount and session count.');
+    const pkg = membershipPackages.find((item) => item.id === Number(membershipForm.packageId));
+    if (!membershipForm.name.trim() || membershipForm.phone.replace(/\D/g, '').length !== 10 || !pkg) {
+      setMembershipError('Enter client details and select a membership package.');
       return;
     }
-    addMembershipRecord(membershipForm);
-    setMembershipForm((form) => ({ ...form, name: '', phone: '', packageName: '', notes: '' }));
+    const record = addMembershipRecord(membershipForm);
+    setSavedMembership(record);
+    setMembershipForm((form) => ({ ...form, name: '', phone: '', notes: '' }));
     setMembershipError('');
-    showNotice('Membership added');
+    showNotice('Membership added — receipt generated');
+  };
+  const savePackage = (event) => {
+    event.preventDefault();
+    const sessions = Number(packageForm.sessions);
+    const price = Number(packageForm.price);
+    const validityMonths = Number(packageForm.validityMonths);
+    if (!packageForm.name.trim() || sessions <= 0 || price <= 0 || validityMonths <= 0) {
+      setPackageError('Enter a package name, sessions, price and validity greater than zero.');
+      return;
+    }
+    let nextPackages;
+    if (editingPackageId) {
+      nextPackages = membershipPackages.map((pkg) => pkg.id === editingPackageId ? { ...pkg, name: packageForm.name.trim(), sessions, price, validityMonths, notes: packageForm.notes } : pkg);
+    } else {
+      nextPackages = [...membershipPackages, { id: Date.now(), name: packageForm.name.trim(), sessions, price, validityMonths, active: true, notes: packageForm.notes }];
+    }
+    setMembershipPackages(nextPackages);
+    saveJSON(STORAGE.membershipPackages, nextPackages);
+    setPackageForm({ name: '', sessions: '8', price: '12000', validityMonths: '6', notes: '' });
+    setEditingPackageId(null);
+    setPackageError('');
+    showNotice(editingPackageId ? 'Package updated' : 'Package created');
+  };
+  const editPackage = (pkg) => {
+    setPackageForm({ name: pkg.name, sessions: String(pkg.sessions), price: String(pkg.price), validityMonths: String(pkg.validityMonths), notes: pkg.notes || '' });
+    setEditingPackageId(pkg.id);
+    setPackageError('');
+  };
+  const togglePackageActive = (id) => {
+    const nextPackages = membershipPackages.map((pkg) => pkg.id === id ? { ...pkg, active: !pkg.active } : pkg);
+    setMembershipPackages(nextPackages);
+    saveJSON(STORAGE.membershipPackages, nextPackages);
   };
   const completeMembershipSession = (id) => setMemberships((records) => {
     const nextRecords = records.map((membership) => membership.id === id && membership.usedSessions < membership.sessions ? { ...membership, usedSessions: membership.usedSessions + 1 } : membership);
     saveJSON(STORAGE.memberships, nextRecords);
     return nextRecords;
   });
+  const membershipsByPhone = (phone) => memberships.filter((membership) => membership.phone === phone.replace(/\D/g, ''));
+  const redeemMembershipSession = (event) => {
+    event.preventDefault();
+    const membership = memberships.find((item) => item.id === redeemForm.membershipId);
+    if (!membership || !canRedeemSession(membership)) { showNotice('This membership cannot redeem a session.'); return; }
+    const remainingAfter = membership.sessions - membership.usedSessions - 1;
+    const visit = {
+      id: Date.now(),
+      membershipId: membership.id,
+      memberId: membership.memberId,
+      name: membership.name,
+      phone: membership.phone,
+      packageName: membership.packageName,
+      date: businessDate,
+      time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+      service: redeemForm.service,
+      staff: redeemForm.staff,
+      sessionNumber: membership.usedSessions + 1,
+      remainingAfter,
+      frontDeskUser: userEmail || userRole,
+      notes: redeemForm.notes
+    };
+    const nextVisits = [visit, ...membershipVisits];
+    setMembershipVisits(nextVisits);
+    saveJSON(STORAGE.membershipVisits, nextVisits);
+    const nextMemberships = memberships.map((item) => item.id === membership.id ? { ...item, usedSessions: item.usedSessions + 1 } : item);
+    setMemberships(nextMemberships);
+    saveJSON(STORAGE.memberships, nextMemberships);
+    setSavedMembershipVisit({ ...visit, memberId: membership.memberId, sessions: membership.sessions });
+    setRedeemForm({ membershipId: null, service: defaultServices[0]?.name || '', staff: defaultStaff[0]?.name || '', notes: '' });
+    showNotice(`Session used for ${membership.name} — ${remainingAfter} remaining. No charge, no towel cash.`);
+  };
   const filteredMemberships = memberships.filter((membership) => {
     const query = membershipSearch.toLowerCase().trim();
     if (!query) return true;
@@ -722,14 +1085,15 @@ function App() {
       'Client Name': membership.name,
       'Phone Number': membership.phone,
       'Branch': membership.branch,
-      'Duration': membership.duration,
       'Package': membership.packageName,
+      'Status': getMembershipStatus(membership),
       'Used Sessions': membership.usedSessions,
       'Remaining Sessions': membership.sessions - membership.usedSessions,
       'Total Sessions': membership.sessions,
       'Amount Paid': membership.amount,
       'Payment Mode': membership.paymentMode,
       'Start Date': membership.startDate,
+      'Expiry Date': membership.expiryDate,
       'Notes': membership.notes
     }));
     const worksheet = XLSX.utils.json_to_sheet(rows);
@@ -810,51 +1174,6 @@ function App() {
     setExpenseError('');
     showNotice('Expense added');
   };
-  const resetTestData = () => {
-    if (!window.confirm('Clear all saved data and return to the beginning?')) return;
-    const freshDate = todayISO();
-    setDailyRows([]);
-    setDailyExpenses([]);
-    setExpenseError('');
-    setSavedReceipt(null);
-    setSavedAppointment(null);
-    setClients([]);
-    saveJSON(STORAGE.clients, []);
-    setClientForm({ name: '', phone: '' });
-    setClientError('');
-    setMemberships([]);
-    setMembershipForm({ name: '', phone: '', amount: '15000', sessions: '8', paymentMode: 'Cash', startDate: '2026-09-24', notes: '' });
-    setMembershipError('');
-    setBusinessDate(freshDate);
-    setClosedDates([]);
-    setReceiptEntries([]);
-    setDeletionLogs([]);
-    setServices(defaultServices);
-    setStaffList(defaultStaff);
-    setAppointmentError('');
-    setReceiptError('');
-    setSearch('');
-    setPaymentMethod('GPay / UPI');
-    setPage(userRole === 'Frontdesk' ? 'Appointments' : 'Dashboard');
-    const freshApts = getInitialAppointments(freshDate);
-    setAppointmentsList(freshApts);
-    saveJSON(STORAGE.businessDate, freshDate);
-    saveJSON(STORAGE.closedDates, []);
-    saveJSON(STORAGE.receiptEntries, []);
-    saveJSON(STORAGE.deletionLogs, []);
-    saveJSON(STORAGE.appointments, freshApts);
-    saveJSON(STORAGE.services, defaultServices);
-    saveJSON(STORAGE.staff, defaultStaff);
-    setSelectedAppointmentDate(freshDate);
-    setReceipt({ client: '', phone: '', date: freshDate, discount: '0', tax: '5', memberFee: '0', towelKit: '0', notes: '' });
-    setReceiptItems([{ id: 1, service: 'Swedish Massage', staff: 'Meena', quantity: 1, price: 2000 }]);
-    setNextReceiptNumber(1);
-    window.localStorage.setItem('salon-next-receipt-number-v2', '1');
-    setDailyFrom('2026-09-01');
-    setDailyTo('2026-09-30');
-    showNotice('All data cleared. Starting fresh.');
-  };
-
   const handleLogin = (event) => {
     event.preventDefault();
     const email = loginForm.email.trim().toLowerCase();
@@ -883,7 +1202,7 @@ function App() {
   const todayExpenseTotal = todayExpenses.reduce((total, item) => total + item.amount, 0);
   const visibleNav = userRole === 'Frontdesk' ? frontdeskNavItems : navItems;
 
-  if (!userRole) return <main className="login-shell"><section className="login-card"><div className="login-brand"><span className="brand-mark">B</span><div><strong>Bizora</strong><span>Business manager</span></div></div><div className="login-heading"><p className="panel-kicker">Sign in</p><h1>Welcome back</h1><p>Enter your email and password to continue.</p></div><form className="login-form" onSubmit={handleLogin}><label>Email address<input type="email" value={loginForm.email} onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })} placeholder="you@bizora.com" autoComplete="username" required /></label><label>Password<input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} placeholder="Enter password" autoComplete="current-password" required /></label>{loginError && <div className="form-error" role="alert">{loginError}</div>}<button className="primary-button login-button" type="submit">Sign in<span>→</span></button></form></section></main>;
+  if (!userRole) return <main className="login-shell"><section className="login-card"><div className="login-brand"><span className="brand-mark">{businessProfile.name[0] || 'B'}</span><div><strong>{businessProfile.name}</strong><span>{businessProfile.tagline}</span></div></div><div className="login-heading"><p className="panel-kicker">Sign in</p><h1>Welcome back</h1><p>Enter your email and password to continue.</p></div><form className="login-form" onSubmit={handleLogin}><label>Email address<input type="email" value={loginForm.email} onChange={(event) => setLoginForm({ ...loginForm, email: event.target.value })} placeholder="you@bizora.com" autoComplete="username" required /></label><label>Password<input type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} placeholder="Enter password" autoComplete="current-password" required /></label>{loginError && <div className="form-error" role="alert">{loginError}</div>}<button className="primary-button login-button" type="submit">Sign in<span>→</span></button></form></section></main>;
 
   const metricData = [
     ["Today's Appointments", '0', 'No appointments', 'violet'],
@@ -894,13 +1213,13 @@ function App() {
 
   return <div className="app-shell">
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
-      <div className="brand-wrap"><div className="brand-mark">B</div><div className="brand-copy"><div className="brand-title">Bizora</div><div className="brand-subtitle">Business manager</div></div><button type="button" className="sidebar-toggle" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>{sidebarCollapsed ? '›' : '‹'}</button></div>
-      <nav className="nav" aria-label="Primary navigation">{visibleNav.map(([label, icon]) => { const route = routeFor(label); return <button key={label} className={`nav-item ${page === route ? 'active' : ''}`} onClick={() => setPage(route)}><span>{icon}</span>{label}</button>; })}</nav>
-      <div className="sidebar-footer">{userRole === 'Frontdesk' ? <><span>Working date</span><strong>{formatDisplayDate(businessDate)}</strong><button type="button" className="close-day-button" onClick={closeBusinessDay} disabled={dayIsClosed}>Close day</button></> : <><span className="status-dot" /> Open today <strong>9:00 - 20:00</strong></>}<button type="button" className="clear-data-button" onClick={resetTestData}>Clear all data</button></div>
+      <div className="brand-wrap"><div className="brand-mark">{businessProfile.name[0] || 'B'}</div><div className="brand-copy"><div className="brand-title">{businessProfile.name}</div><div className="brand-subtitle">{businessProfile.tagline}</div></div><button type="button" className="sidebar-toggle" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>{sidebarCollapsed ? '›' : '‹'}</button></div>
+      <nav className="nav" aria-label="Primary navigation">{visibleNav.map(([label, icon, kind]) => { if (kind === 'section') return <div key={label} className="nav-section-label">{label}</div>; const route = routeFor(label); return <button key={label} className={`nav-item ${kind === 'sub' ? 'nav-item-sub' : ''} ${page === route ? 'active' : ''}`} onClick={() => setPage(route)}><span>{icon}</span>{label}</button>; })}</nav>
+      <div className="sidebar-footer">{userRole === 'Frontdesk' ? <><span>Working date</span><strong>{formatDisplayDate(businessDate)}</strong><button type="button" className="close-day-button" onClick={closeBusinessDay} disabled={dayIsClosed}>Close day</button></> : <><span className="status-dot" /> Open today <strong>{formatTime12h(businessProfile.openTime)} - {formatTime12h(businessProfile.closeTime)}</strong></>}</div>
     </aside>
 
     <main className="main-panel">
-      <header className="topbar"><div>{page !== 'Expenditure' && page !== 'Receipts' && page !== 'Clients' && page !== 'Staff' && page !== 'Services' && page !== 'Daily Receipts' && <h1>{page === 'Dashboard' ? formatDisplayDate(businessDate) : page === 'Appointments' ? 'Appointment Dashboard' : page}</h1>}</div><div className="topbar-actions"><button className="icon-button" aria-label="Notifications">♧<span className="notification-dot" /></button><div className="user-pill"><span className="avatar">{userRole[0]}</span><span>{userRole}</span><b>⌄</b></div></div></header>
+      <header className="topbar"><div>{page !== 'Expenditure' && page !== 'Receipts' && page !== 'Clients' && page !== 'Staff' && page !== 'Services' && page !== 'Daily Receipts' && page !== 'Memberships' && <h1>{page === 'Dashboard' ? formatDisplayDate(businessDate) : page === 'Appointments' ? 'Appointment Dashboard' : page}</h1>}</div><div className="topbar-actions"><button className="icon-button" aria-label="Notifications">♧<span className="notification-dot" /></button><div className="user-pill"><span className="avatar">{userRole[0]}</span><span>{userRole}</span><b>⌄</b></div></div></header>
       {page === 'Dashboard' && userRole !== 'Frontdesk' ? <>
         <section className="quick-actions">{['+ New Appointment', '+ Daily Report', '+ Add Expense', 'View Monthly Report'].map((action) => <button key={action} className="action-button" onClick={() => action === '+ Daily Report' ? setPage('Receipts') : action === '+ New Appointment' ? openNewAppointment() : action === '+ Add Expense' ? setPage('Expenditure') : action === 'View Monthly Report' ? setPage('Daily Receipts') : showNotice(`${action.replace('+ ', '')} opened`)}>{action}</button>)}</section>
         <section className="toolbar"><div className="filter-bar">{['Today', 'This Week', 'This Month', 'Custom'].map((item) => <button key={item} className={`chip ${range === item ? 'active' : ''}`} onClick={() => setRange(item)}>{item}</button>)}</div><div className="date-range"><label>From <input type="date" defaultValue="2026-09-01" /></label><span>to</span><label>To <input type="date" defaultValue="2026-09-30" /></label></div></section>
@@ -1213,17 +1532,25 @@ function App() {
             {expenseError && <div className="form-error" role="alert">{expenseError}</div>}
             <button className="primary-button save-receipt-button" type="submit">Save expense <span>→</span></button>
           </fieldset>
-          <aside className="receipt-preview expenditure-preview"><div className="preview-top"><span className="preview-logo">B</span><div><strong>Bizora</strong><span>Manager</span></div><span className="preview-label">{dayIsClosed ? 'CLOSED' : 'OPEN'}</span></div><div className="preview-divider" /><div className="preview-heading"><div><p className="panel-kicker">Today</p><h3>{money(todayExpenseTotal)}</h3></div><span>{todayExpenses.length} {todayExpenses.length === 1 ? 'entry' : 'entries'}</span></div><div className="preview-client"><span>Current entry</span><strong>{expenseForm.narration || 'Expense description'}</strong><small>{businessDate} · {expenseForm.source}</small></div><div className="preview-totals"><div><span>Current amount</span><strong>{money(Number(expenseForm.amount) || 0)}</strong></div><div className="preview-total"><span>Today's total</span><strong>{money(todayExpenseTotal)}</strong></div></div><p className="preview-thanks">Outgoing payments, accounted for.</p></aside>
+          <aside className="receipt-preview expenditure-preview"><div className="preview-top"><span className="preview-logo">{businessProfile.name[0] || 'B'}</span><div><strong>{businessProfile.name}</strong><span>Manager</span></div><span className="preview-label">{dayIsClosed ? 'CLOSED' : 'OPEN'}</span></div><div className="preview-divider" /><div className="preview-heading"><div><p className="panel-kicker">Today</p><h3>{money(todayExpenseTotal)}</h3></div><span>{todayExpenses.length} {todayExpenses.length === 1 ? 'entry' : 'entries'}</span></div><div className="preview-client"><span>Current entry</span><strong>{expenseForm.narration || 'Expense description'}</strong><small>{businessDate} · {expenseForm.source}</small></div><div className="preview-totals"><div><span>Current amount</span><strong>{money(Number(expenseForm.amount) || 0)}</strong></div><div className="preview-total"><span>Today's total</span><strong>{money(todayExpenseTotal)}</strong></div></div><p className="preview-thanks">Outgoing payments, accounted for.</p></aside>
         </form>
         <section className="panel receipt-grid-panel"><div className="panel-header"><div><p className="panel-kicker">Entered today</p><h2>Payment grid</h2></div><span className="form-status">{money(todayExpenseTotal)}</span></div>
           {todayExpenses.length ? <div className="excel-scroll"><table className="excel-table expense-excel-table"><thead><tr><th style={{ width: '8%', textAlign: 'center' }}>#</th><th>Description</th><th>Mode</th><th style={{ textAlign: 'right' }}>Amount</th></tr></thead><tbody>{todayExpenses.slice().reverse().map((item, index) => <tr key={item.id} className="excel-row"><td className="excel-row-num">{index + 1}</td><td>{item.narration}</td><td>{item.source}</td><td style={{ textAlign: 'right' }}><strong>{money(item.amount)}</strong></td></tr>)}</tbody></table></div> : <div className="empty-state">No payments for this date yet.</div>}
         </section>
       </section> : page === 'Memberships' ? <section className="memberships-page">
         <div className="receipt-page-header"><div><p className="panel-kicker">Client plans</p><h2>Memberships</h2><p className="page-intro">Track membership payments and sessions.</p></div><span className="form-status">{memberships.length} {memberships.length === 1 ? 'membership' : 'memberships'}</span></div>
-        <div className="membership-layout"><section className="panel receipt-section"><div className="panel-header"><div><p className="panel-kicker">New membership</p><h2>Plan details</h2></div><span className="form-status">Required</span></div><form className="membership-form" onSubmit={saveMembership}><div className="form-grid"><label>Client name<input value={membershipForm.name} onChange={(event) => setMembershipForm({ ...membershipForm, name: event.target.value })} placeholder="e.g. Priya Sharma" required /></label><label>Phone number<input value={membershipForm.phone} onChange={(event) => setMembershipForm({ ...membershipForm, phone: sanitizePhone(event.target.value) })} placeholder="9876543210" inputMode="numeric" maxLength={10} required /></label><label>Branch<input value={membershipForm.branch} onChange={(event) => setMembershipForm({ ...membershipForm, branch: event.target.value })} placeholder="e.g. Main Branch" required /></label><label>Package<input value={membershipForm.packageName} onChange={(event) => setMembershipForm({ ...membershipForm, packageName: event.target.value })} placeholder="e.g. 8 Session Massage Pack" /></label><label>Validity<select value={membershipForm.duration} onChange={(event) => setMembershipForm({ ...membershipForm, duration: event.target.value })}>{membershipDurations.map((duration) => <option key={duration}>{duration}</option>)}</select></label><label>Membership amount (₹)<input type="number" min="1" value={membershipForm.amount} onChange={(event) => setMembershipForm({ ...membershipForm, amount: event.target.value })} required /></label><label>Total sessions<input type="number" min="1" value={membershipForm.sessions} onChange={(event) => setMembershipForm({ ...membershipForm, sessions: event.target.value })} required /></label><label>Payment mode<select value={membershipForm.paymentMode} onChange={(event) => setMembershipForm({ ...membershipForm, paymentMode: event.target.value })}><option>Cash</option><option>Card</option><option>GPay / UPI</option><option>Other</option></select></label><label>Start date<input type="date" value={membershipForm.startDate} onChange={(event) => setMembershipForm({ ...membershipForm, startDate: event.target.value })} required /></label><label className="notes-field">Notes<input value={membershipForm.notes} onChange={(event) => setMembershipForm({ ...membershipForm, notes: event.target.value })} placeholder="Optional plan note" /></label></div>{membershipError && <div className="form-error" role="alert">{membershipError}</div>}<button className="primary-button save-receipt-button" type="submit">Add membership <span>→</span></button></form></section>
+        <section className="membership-stats-line">
+          <span>Total active memberships <strong>{memberships.filter((m) => getMembershipStatus(m) === 'Active').length}</strong></span>
+          <span>Membership revenue today <strong>{money(memberships.filter((m) => m.startDate === businessDate).reduce((total, m) => total + m.amount, 0))}</strong></span>
+        </section>
+        <div className="membership-layout"><section className="panel receipt-section"><div className="panel-header"><div><p className="panel-kicker">New membership</p><h2>Plan details</h2></div><span className="form-status">Required</span></div><form className="membership-form" onSubmit={saveMembership}><div className="form-grid"><label>Client name<input value={membershipForm.name} onChange={(event) => setMembershipForm({ ...membershipForm, name: event.target.value })} placeholder="e.g. Priya Sharma" required /></label><label>Phone number<input value={membershipForm.phone} onChange={(event) => setMembershipForm({ ...membershipForm, phone: sanitizePhone(event.target.value) })} placeholder="9876543210" inputMode="numeric" maxLength={10} required /></label><label>Package<select value={membershipForm.packageId} onChange={(event) => setMembershipForm({ ...membershipForm, packageId: event.target.value })} required><option value="">Select a package</option>{activeMembershipPackages.map((pkg) => <option key={pkg.id} value={pkg.id}>{pkg.name} — {pkg.sessions} sessions — {money(pkg.price)}</option>)}</select></label><label>Payment mode<select value={membershipForm.paymentMode} onChange={(event) => setMembershipForm({ ...membershipForm, paymentMode: event.target.value })}><option>Cash</option><option>Card</option><option>GPay / UPI</option><option>Other</option></select></label><label>Start date<input type="date" value={membershipForm.startDate} onChange={(event) => setMembershipForm({ ...membershipForm, startDate: event.target.value })} required /></label><label className="notes-field">Notes<input value={membershipForm.notes} onChange={(event) => setMembershipForm({ ...membershipForm, notes: event.target.value })} placeholder="Optional plan note" /></label></div>{(() => { const pkg = membershipPackages.find((item) => item.id === Number(membershipForm.packageId)); if (!pkg) return null; return <div className="membership-autofill"><span>Total sessions</span><strong>{pkg.sessions}</strong><span>Package amount</span><strong>{money(pkg.price)}</strong><span>Validity</span><strong>{pkg.validityMonths} months</strong><span>Expiry date</span><strong>{addMonthsISO(membershipForm.startDate, pkg.validityMonths)}</strong></div>; })()}{membershipError && <div className="form-error" role="alert">{membershipError}</div>}<button className="primary-button save-receipt-button" type="submit">Add membership <span>→</span></button></form></section>
+        {savedMembership && <section className="panel membership-receipt"><div className="panel-header"><div><p className="panel-kicker">Membership receipt</p><h2>{savedMembership.memberId}</h2></div><button type="button" className="secondary-button small" onClick={() => window.print()}>🖨 Print</button></div><table className="eod-report-table"><tbody><tr><td>Client</td><td>{savedMembership.name}</td></tr><tr><td>Mobile</td><td>{savedMembership.phone}</td></tr><tr><td>Package</td><td>{savedMembership.packageName}</td></tr><tr><td>Total sessions</td><td>{savedMembership.sessions}</td></tr><tr className="eod-row-strong"><td>Package amount</td><td>{money(savedMembership.amount)}</td></tr><tr className="eod-row-strong"><td>Amount paid</td><td>{money(savedMembership.amount)}</td></tr><tr><td>Payment mode</td><td>{savedMembership.paymentMode}</td></tr><tr><td>Start date</td><td>{savedMembership.startDate}</td></tr><tr><td>Expiry date</td><td>{savedMembership.expiryDate}</td></tr><tr><td>Available sessions</td><td>{savedMembership.sessions}</td></tr><tr className="eod-row-final"><td>Status</td><td>Active — Paid in full</td></tr></tbody></table></section>}
         <section className="panel membership-list"><div className="panel-header"><div><p className="panel-kicker">Directory sheet</p><h2>Membership clients</h2></div><div className="clients-page-actions"><input className="membership-search" value={membershipSearch} onChange={(event) => setMembershipSearch(event.target.value)} placeholder="Search by name, phone or member ID" /><button type="button" className="secondary-button small" onClick={exportMembershipsToExcel} disabled={!filteredMemberships.length}>Export to Excel</button></div></div>
-          {filteredMemberships.length ? <div className="excel-scroll"><table className="excel-table membership-excel-table"><thead><tr><th style={{ width: '36px', textAlign: 'center' }}>#</th><th>Member ID</th><th>Client Name</th><th>Phone Number</th><th>Branch</th><th>Validity</th><th>Package</th><th>Used Sessions</th><th>Remaining Sessions</th><th>Status</th><th style={{ width: '150px', textAlign: 'center' }}>Actions</th></tr></thead><tbody>{filteredMemberships.map((membership, index) => { const remaining = membership.sessions - membership.usedSessions; const complete = remaining <= 0; return <tr key={membership.id} className="excel-row"><td className="excel-row-num">{index + 1}</td><td><strong>{membership.memberId}</strong></td><td>{membership.name}</td><td><a href={`tel:${membership.phone}`} className="phone" style={{ textDecoration: 'none' }}>📞 {membership.phone}</a></td><td>{membership.branch}</td><td>{membership.duration}</td><td>{membership.packageName || '—'}</td><td>{membership.usedSessions}</td><td>{remaining}</td><td><span className={`membership-status ${complete ? 'complete' : ''}`}>{complete ? 'Completed' : 'Active'}</span></td><td className="excel-actions-cell"><button type="button" className="secondary-button small" disabled={complete} onClick={() => completeMembershipSession(membership.id)}>Use session</button></td></tr>; })}</tbody></table></div> : <div className="empty-state">No memberships yet.</div>}
+          {filteredMemberships.length ? <div className="excel-scroll"><table className="excel-table membership-excel-table"><thead><tr><th style={{ width: '36px', textAlign: 'center' }}>#</th><th>Member ID</th><th>Client Name</th><th>Phone Number</th><th>Package</th><th>Used Sessions</th><th>Remaining Sessions</th><th>Expiry</th><th>Status</th><th style={{ width: '150px', textAlign: 'center' }}>Actions</th></tr></thead><tbody>{filteredMemberships.map((membership, index) => { const remaining = membership.sessions - membership.usedSessions; const statusLabel = getMembershipStatus(membership); const redeemable = canRedeemSession(membership); return <tr key={membership.id} className="excel-row"><td className="excel-row-num">{index + 1}</td><td><strong>{membership.memberId}</strong></td><td>{membership.name}</td><td><a href={`tel:${membership.phone}`} className="phone" style={{ textDecoration: 'none' }}>📞 {membership.phone}</a></td><td>{membership.packageName || '—'}</td><td>{membership.usedSessions}</td><td><span className={`session-count ${remaining === 0 ? 'session-zero' : remaining <= 2 ? 'session-low' : ''}`}>{remaining}</span></td><td>{membership.expiryDate}</td><td><span className={`membership-status ${statusLabel === 'Active' ? 'complete' : ''}`}>{statusLabel}</span></td><td className="excel-actions-cell"><button type="button" className="secondary-button small" disabled={!redeemable} onClick={() => completeMembershipSession(membership.id)}>Use session</button></td></tr>; })}</tbody></table></div> : <div className="empty-state">No memberships yet.</div>}
         </section></div>
+        <section className="panel membership-list"><div className="panel-header"><div><p className="panel-kicker">Audit trail</p><h2>Session usage history</h2></div><span className="form-status">{membershipVisits.length} sessions logged</span></div>
+          {membershipVisits.length ? <div className="excel-scroll"><table className="excel-table membership-excel-table"><thead><tr><th style={{ width: '36px', textAlign: 'center' }}>#</th><th>Date</th><th>Time</th><th>Client</th><th>Package</th><th>Service</th><th>Staff</th><th>Session #</th><th>Remaining After</th><th>Front desk</th></tr></thead><tbody>{membershipVisits.slice(0, 50).map((visit, index) => <tr key={visit.id} className="excel-row"><td className="excel-row-num">{index + 1}</td><td>{visit.date}</td><td>{visit.time}</td><td>{visit.name}</td><td>{visit.packageName}</td><td>{visit.service}</td><td>{visit.staff}</td><td>{visit.sessionNumber}</td><td><span className={`session-count ${visit.remainingAfter === 0 ? 'session-zero' : visit.remainingAfter <= 2 ? 'session-low' : ''}`}>{visit.remainingAfter}</span></td><td>{visit.frontDeskUser}</td></tr>)}</tbody></table></div> : <div className="empty-state">No membership sessions used yet.</div>}
+        </section>
       </section> : page === 'Clients' ? <section className="clients-page">
         <div className="receipt-page-header clients-page-header"><div><p className="panel-kicker">People</p><h2>Clients</h2><p className="page-intro">Browse saved client contacts.</p></div><div className="clients-page-actions"><span className="form-status">{clients.length} {clients.length === 1 ? 'client' : 'clients'}</span><button type="button" className="primary-button" onClick={() => { setClientError(''); setShowClientForm((visible) => !visible); }}>{showClientForm ? 'Close form' : '+ Add client'}</button></div></div>
         {showClientForm && <section className="panel client-entry-panel"><div className="panel-header"><div><p className="panel-kicker">New client</p><h2>Client details</h2></div><span className="form-status">Required</span></div><form className="client-form" onSubmit={saveClient}><label>Client name<input autoFocus value={clientForm.name} onChange={(event) => setClientForm({ ...clientForm, name: event.target.value })} placeholder="e.g. Priya Sharma" required /></label><label>Phone number<input value={clientForm.phone} onChange={(event) => setClientForm({ ...clientForm, phone: sanitizePhone(event.target.value) })} placeholder="9876543210" inputMode="numeric" maxLength={10} pattern="[0-9]{10}" required /></label>{clientError && <div className="form-error" role="alert">{clientError}</div>}<button className="primary-button" type="submit">Add client <span>→</span></button></form></section>}
@@ -1236,6 +1563,16 @@ function App() {
         <div className="receipt-page-header clients-page-header"><div><p className="panel-kicker">Team</p><h2>Staff</h2><p className="page-intro">Browse staff names, roles, and phone numbers.</p></div><div className="clients-page-actions"><span className="form-status">{staffList.length} staff</span><button type="button" className="primary-button" onClick={() => setShowStaffForm((visible) => !visible)}>{showStaffForm ? 'Close form' : '+ Add staff'}</button></div></div>
         {showStaffForm && <section className="panel client-entry-panel"><div className="panel-header"><div><p className="panel-kicker">New staff</p><h2>Staff details</h2></div><span className="form-status">Required</span></div><form className="client-form" onSubmit={saveStaffMember}><label>Staff name<input autoFocus value={staffForm.name} onChange={(event) => setStaffForm({ ...staffForm, name: event.target.value })} placeholder="e.g. Meena" required /></label><label>Phone number<input value={staffForm.phone} onChange={(event) => setStaffForm({ ...staffForm, phone: sanitizePhone(event.target.value) })} placeholder="9876543210" inputMode="numeric" maxLength={10} pattern="[0-9]{10}" required /></label><label>Role<select value={staffForm.role} onChange={(event) => setStaffForm({ ...staffForm, role: event.target.value })}><option>Massage Therapist</option><option>Facial Therapist</option><option>Hair Specialist</option><option>Nail Technician</option><option>Receptionist</option></select></label><button className="primary-button" type="submit">Add staff <span>→</span></button></form></section>}
         <section className="directory-sheet-panel"><div className="panel-header"><div><p className="panel-kicker">Directory sheet</p><h2>Saved staff</h2></div></div>{staffList.length ? <div className="directory-sheet-scroll"><table className="directory-sheet"><thead><tr><th>#</th><th>Staff Name</th><th>Role</th><th>Phone Number</th><th>Actions</th></tr></thead><tbody>{staffList.map((member, index) => <tr key={member.id}><td>{index + 1}</td><td><strong>{member.name}</strong></td><td>{member.role}</td><td>{member.phone}</td><td><button type="button" className="secondary-button small" onClick={() => deleteStaffMember(member.id)}>Remove</button></td></tr>)}</tbody></table></div> : <div className="empty-state">No staff yet.</div>}</section>
+        <section className="panel attendance-panel">
+          <div className="panel-header"><div><p className="panel-kicker">Team</p><h2>Attendance</h2></div><label className="attendance-date-picker">Date<input type="date" value={attendanceDate} onChange={(event) => setAttendanceDate(event.target.value)} /></label></div>
+          <div className="daily-metrics-grid attendance-summary-grid">
+            <article className="daily-metric violet"><span>Present</span><strong>{attendanceSummary.present}</strong></article>
+            <article className="daily-metric gold"><span>Half day</span><strong>{attendanceSummary.halfDay}</strong></article>
+            <article className="daily-metric rose"><span>Absent</span><strong>{attendanceSummary.absent}</strong></article>
+            <article className="daily-metric ink"><span>Not marked</span><strong>{attendanceSummary.unmarked}</strong></article>
+          </div>
+          {staffList.length ? <div className="directory-sheet-scroll"><table className="directory-sheet"><thead><tr><th>#</th><th>Staff Name</th><th>Role</th><th>Status</th></tr></thead><tbody>{staffList.map((member, index) => { const current = attendanceForDate[member.id]; return <tr key={member.id}><td>{index + 1}</td><td><strong>{member.name}</strong></td><td>{member.role}</td><td><div className="attendance-status-buttons">{['Present', 'Half Day', 'Absent'].map((status) => <button key={status} type="button" className={`attendance-status-btn ${status.toLowerCase().replace(' ', '-')} ${current === status ? 'active' : ''}`} onClick={() => markAttendance(member.id, status)}>{status}</button>)}</div></td></tr>; })}</tbody></table></div> : <div className="empty-state">No staff yet.</div>}
+        </section>
       </section> : page === 'Daily Receipts' ? <section className="daily-receipts-page">
         <div className="receipt-page-header"><div><p className="panel-kicker">Reports</p><h2>Monthly Report</h2><p className="page-intro">Daily opening balance, receipts, payments, and closing balance.</p></div><div className="daily-header-actions"><button type="button" className="secondary-button" onClick={exportMonthlyReport}>Export XLSX</button><button className="primary-button" onClick={() => setPage('Expenditure')}>+ Add expense</button></div></div>
         <section className="daily-toolbar panel"><div><p className="panel-kicker">Report period</p><div className="daily-date-controls"><label>From<input type="date" value={dailyFrom} onChange={(event) => setDailyFrom(event.target.value)} /></label><span>to</span><label>To<input type="date" value={dailyTo} onChange={(event) => setDailyTo(event.target.value)} /></label></div></div><div className="daily-period-note"><strong>{monthlySnapshots.length} days</strong><span>Daily opening and closing balances for the selected period.</span></div></section>
@@ -1251,23 +1588,161 @@ function App() {
             {appointmentError && <div className="form-error" role="alert">{appointmentError}</div>}
             <button className="primary-button save-receipt-button" type="submit">{editingAppointmentId ? 'Save changes' : 'Book appointment'} <span>→</span></button>
           </div>
-          <aside className="receipt-preview appointment-preview"><div className="preview-top"><span className="preview-logo">S</span><div><strong>Salon &amp; Spa</strong><span>Manager</span></div><span className="preview-label">{savedAppointment ? 'BOOKED' : 'PREVIEW'}</span></div><div className="preview-divider" /><div className="preview-heading"><div><p className="panel-kicker">Appointment</p><h3>{savedAppointment?.id || 'APT-1048'}</h3></div><span>{appointment.date}</span></div><div className="preview-client"><span>Client</span><strong>{appointment.client || 'Client name'}</strong><small>{appointment.phone || 'Phone number'}</small></div><div className="appointment-summary-block"><div><span className="summary-icon">◷</span><div><small>Date &amp; time</small><strong>{appointment.date} at {formatTime12h(appointment.time)}</strong></div></div><div><span className="summary-icon">✦</span><div><small>Service</small><strong>{appointment.service} · {appointment.duration}</strong></div></div><div><span className="summary-icon">♙</span><div><small>Therapist</small><strong>{appointment.staff}</strong></div></div></div><p className="preview-thanks">A calm visit starts with a clear plan.</p>{savedAppointment && <button type="button" className="secondary-button print-button" onClick={() => window.print()}>Print appointment</button>}</aside>
+          <aside className="receipt-preview appointment-preview"><div className="preview-top"><span className="preview-logo">{businessProfile.name[0] || 'B'}</span><div><strong>{businessProfile.name}</strong><span>Manager</span></div><span className="preview-label">{savedAppointment ? 'BOOKED' : 'PREVIEW'}</span></div><div className="preview-divider" /><div className="preview-heading"><div><p className="panel-kicker">Appointment</p><h3>{savedAppointment?.id || 'APT-1048'}</h3></div><span>{appointment.date}</span></div><div className="preview-client"><span>Client</span><strong>{appointment.client || 'Client name'}</strong><small>{appointment.phone || 'Phone number'}</small></div><div className="appointment-summary-block"><div><span className="summary-icon">◷</span><div><small>Date &amp; time</small><strong>{appointment.date} at {formatTime12h(appointment.time)}</strong></div></div><div><span className="summary-icon">✦</span><div><small>Service</small><strong>{appointment.service} · {appointment.duration}</strong></div></div><div><span className="summary-icon">♙</span><div><small>Therapist</small><strong>{appointment.staff}</strong></div></div></div><p className="preview-thanks">A calm visit starts with a clear plan.</p>{savedAppointment && <button type="button" className="secondary-button print-button" onClick={() => window.print()}>Print appointment</button>}</aside>
         </div>
       </form> : page === 'Receipts' ? <section className="receipt-page">
         <div className="receipt-page-header"><div><p className="panel-kicker">Current day</p><h2>Daily receipts</h2><p className="page-intro">{formatDisplayDate(businessDate)}. Enter, save, and review in the grid. Wrong entry? Delete and re-enter. No edit after save.</p></div><div className="daily-header-actions"><span className="form-status">{dayIsClosed ? 'Closed' : 'Open'}</span><button type="button" className="primary-button" onClick={closeBusinessDay} disabled={dayIsClosed}>Close day</button></div></div>
+        <section className="target-strip">
+          <article className="target-strip-card">
+            <span>Target set ({formatMonthLabel(getMonthKey(businessDate))})</span>
+            <strong>{money(getMonthlyTarget(getMonthKey(businessDate)))}</strong>
+          </article>
+          <article className="target-strip-card">
+            <span>Achieved so far (till previous date)</span>
+            <strong>{money(achievedBeforeDate(getMonthKey(businessDate), businessDate))}</strong>
+          </article>
+        </section>
+        <section className="panel receipt-section membership-lookup-panel">
+          <div className="panel-header"><div><p className="panel-kicker">Membership</p><h2>Find membership by mobile number</h2></div></div>
+          <div className="settings-form membership-lookup-input"><label>Mobile number<input value={membershipLookupPhone} onChange={(event) => setMembershipLookupPhone(sanitizePhone(event.target.value))} placeholder="9876543210" inputMode="numeric" maxLength={10} /></label></div>
+          {membershipLookupPhone.length === 10 && (() => {
+            const found = membershipsByPhone(membershipLookupPhone);
+            if (!found.length) return <div className="empty-state">No membership found for this number.</div>;
+            return <div className="membership-lookup-results">{found.map((membership) => {
+              const remaining = membership.sessions - membership.usedSessions;
+              const statusLabel = getMembershipStatus(membership);
+              const redeemable = canRedeemSession(membership);
+              const isRedeeming = redeemForm.membershipId === membership.id;
+              return <div className="membership-lookup-card" key={membership.id}>
+                <div className="membership-lookup-head"><strong>{membership.name}</strong><span className={`membership-status ${statusLabel === 'Active' ? 'complete' : ''}`}>{statusLabel}</span></div>
+                <div className="membership-lookup-grid">
+                  <span>Package<strong>{membership.packageName}</strong></span>
+                  <span>Total sessions<strong>{membership.sessions}</strong></span>
+                  <span>Used<strong>{membership.usedSessions}</strong></span>
+                  <span>Remaining<strong className={`session-count ${remaining === 0 ? 'session-zero' : remaining <= 2 ? 'session-low' : ''}`}>{remaining}</strong></span>
+                  <span>Expiry<strong>{membership.expiryDate}</strong></span>
+                </div>
+                {!redeemable && <p className="receipt-accounting-note">{remaining === 0 ? 'Sessions exhausted — this membership cannot be redeemed.' : `This membership is ${statusLabel.toLowerCase()} and cannot be redeemed.`}</p>}
+                {redeemable && !isRedeeming && <button type="button" className="secondary-button small" onClick={() => setRedeemForm({ membershipId: membership.id, service: services[0]?.name || '', staff: staffList[0]?.name || '', notes: '' })}>Use 1 session</button>}
+                {redeemable && isRedeeming && <form className="membership-redeem-form" onSubmit={redeemMembershipSession}>
+                  <label>Service<select value={redeemForm.service} onChange={(event) => setRedeemForm({ ...redeemForm, service: event.target.value })}>{services.map((service) => <option key={service.id}>{service.name}</option>)}</select></label>
+                  <label>Staff<select value={redeemForm.staff} onChange={(event) => setRedeemForm({ ...redeemForm, staff: event.target.value })}>{staffList.map((member) => <option key={member.id}>{member.name}</option>)}</select></label>
+                  <button type="submit" className="primary-button small">Confirm session <span>→</span></button>
+                  <button type="button" className="secondary-button small" onClick={() => setRedeemForm({ membershipId: null, service: '', staff: '', notes: '' })}>Cancel</button>
+                </form>}
+              </div>;
+            })}</div>;
+          })()}
+        </section>
+        {savedMembershipVisit && <section className="panel membership-receipt membership-visit-receipt"><div className="panel-header"><div><p className="panel-kicker">Membership visit receipt</p><h2>{savedMembershipVisit.memberId}</h2></div><button type="button" className="secondary-button small" onClick={() => window.print()}>🖨 Print</button></div><table className="eod-report-table"><tbody><tr><td>Client</td><td>{savedMembershipVisit.name} <span className="membership-status complete">Member</span></td></tr><tr><td>Mobile</td><td>{savedMembershipVisit.phone}</td></tr><tr><td>Package</td><td>{savedMembershipVisit.packageName}</td></tr><tr><td>Service</td><td>{savedMembershipVisit.service}</td></tr><tr><td>Staff</td><td>{savedMembershipVisit.staff}</td></tr><tr><td>Date &amp; time</td><td>{savedMembershipVisit.date} · {savedMembershipVisit.time}</td></tr><tr className="eod-row-strong"><td>Amount charged</td><td>{money(0)}</td></tr><tr><td>Session used</td><td>{savedMembershipVisit.sessionNumber} of {savedMembershipVisit.sessions}</td></tr><tr><td>Sessions remaining</td><td>{savedMembershipVisit.remainingAfter}</td></tr><tr className="eod-row-final"><td>Status</td><td>Existing member — session redeemed, no payment due</td></tr></tbody></table></section>}
         <form className="receipt-layout" onSubmit={saveReceipt}>
           <fieldset className="receipt-form-column unified-receipt-panel" disabled={dayIsClosed}>
-            <section className="panel receipt-section"><div className="panel-header"><span className="form-status">{businessDate}</span></div><div className="form-grid"><label>Client name<input autoFocus value={receipt.client} onChange={(event) => updateReceipt('client', event.target.value)} placeholder="e.g. Ravi Kumar" /></label><label>Phone number<input value={receipt.phone} onChange={(event) => updateReceipt('phone', sanitizePhone(event.target.value))} placeholder="9876543210" inputMode="numeric" maxLength={10} pattern="[0-9]{10}" /></label><label>Receipt date<input type="date" value={businessDate} readOnly /></label><label>Appointment reference<input placeholder="Optional" /></label></div></section>
-            <section className="panel receipt-section"><div className="panel-header"><button type="button" className="secondary-button small" onClick={addReceiptItem}>+ Add service</button></div><div className="receipt-items">{receiptItems.map((item, index) => <div className="receipt-item-row" key={item.id}><span className="item-number">{String(index + 1).padStart(2, '0')}</span><label>Service<select value={item.service} onChange={(event) => { const selected = services.find((service) => service.name === event.target.value); updateReceiptItem(item.id, 'service', event.target.value); updateReceiptItem(item.id, 'staff', selected?.staff || item.staff || 'Meena'); updateReceiptItem(item.id, 'price', selected?.price || item.price); }}>{services.map((service) => <option key={service.id}>{service.name}</option>)}</select></label><label>Staff<select value={item.staff} onChange={(event) => updateReceiptItem(item.id, 'staff', event.target.value)}>{staffList.map((member) => <option key={member.id}>{member.name}</option>)}</select></label><label className="compact-field">Qty<input type="number" min="1" value={item.quantity} onChange={(event) => updateReceiptItem(item.id, 'quantity', event.target.value)} /></label><label className="price-field">Price<input type="number" min="0" value={item.price} onChange={(event) => updateReceiptItem(item.id, 'price', event.target.value)} /></label><button type="button" className="remove-item" aria-label={`Remove service ${index + 1}`} onClick={() => removeReceiptItem(item.id)}>×</button></div>)}</div></section>
-            <section className="panel receipt-section"><div className="panel-header"><span className="form-status">{paymentMethod}</span></div><div className="payment-methods receipt-payment-methods">{['Cash', 'Card', 'GPay / UPI', 'Other'].map((method) => <button type="button" key={method} className={`method-pill ${paymentMethod === method ? 'selected' : ''}`} onClick={() => setPaymentMethod(method)}>{method}</button>)}</div><div className="form-grid adjustment-grid"><label>Discount (₹)<input type="number" min="0" value={receipt.discount} onChange={(event) => updateReceipt('discount', event.target.value)} /></label><label>Tax (%)<input type="number" min="0" max="100" value={receipt.tax} onChange={(event) => updateReceipt('tax', event.target.value)} /></label><label>Membership fee (₹)<input type="number" min="0" value={receipt.memberFee} onChange={(event) => updateReceipt('memberFee', event.target.value)} /></label><label>Towel kit cashout (₹)<input type="number" min="0" value={receipt.towelKit} onChange={(event) => updateReceipt('towelKit', event.target.value)} /></label><label className="notes-field">Notes<input value={receipt.notes} onChange={(event) => updateReceipt('notes', event.target.value)} placeholder="Optional note for the client" /></label></div><p className="receipt-accounting-note">Saved receipts appear in the grid for {formatDisplayDate(businessDate)}. There is no edit. Delete and re-enter if needed.</p></section>
-            <section className="panel receipt-section"><div className="panel-header"><label className="membership-toggle"><input type="checkbox" checked={receiptMembership} onChange={(event) => setReceiptMembership(event.target.checked)} /> Add this client as a membership</label></div>{receiptMembership && <div className="form-grid"><label>Branch<input value={receiptMembershipForm.branch} onChange={(event) => setReceiptMembershipForm({ ...receiptMembershipForm, branch: event.target.value })} placeholder="e.g. Main Branch" /></label><label>Package<input value={receiptMembershipForm.packageName} onChange={(event) => setReceiptMembershipForm({ ...receiptMembershipForm, packageName: event.target.value })} placeholder="e.g. 8 Session Massage Pack" /></label><label>Validity<select value={receiptMembershipForm.duration} onChange={(event) => setReceiptMembershipForm({ ...receiptMembershipForm, duration: event.target.value })}>{membershipDurations.map((duration) => <option key={duration}>{duration}</option>)}</select></label><label>Total sessions<input type="number" min="1" value={receiptMembershipForm.sessions} onChange={(event) => setReceiptMembershipForm({ ...receiptMembershipForm, sessions: event.target.value })} /></label></div>}</section>
+            <section className="panel receipt-section"><div className="panel-header"><span className="form-status">{businessDate}</span></div><div className="form-grid classic-fields"><label>Client name<input autoFocus value={receipt.client} onChange={(event) => updateReceipt('client', event.target.value)} placeholder="e.g. Ravi Kumar" /></label><label>Phone number<input value={receipt.phone} onChange={(event) => updateReceipt('phone', sanitizePhone(event.target.value))} placeholder="9876543210" inputMode="numeric" maxLength={10} pattern="[0-9]{10}" /></label><label>Receipt date<input type="date" value={businessDate} readOnly /></label><label>Appointment reference<input placeholder="Optional" /></label></div></section>
+            <section className="panel receipt-section classic-items-panel"><div className="panel-header"><button type="button" className="secondary-button small" onClick={addReceiptItem}>+ Add service</button></div><div className="receipt-items classic-items">{receiptItems.map((item, index) => <div className="receipt-item-row" key={item.id}><span className="item-number">{String(index + 1).padStart(2, '0')}</span><label>Service<select value={item.service} onChange={(event) => { const selected = services.find((service) => service.name === event.target.value); updateReceiptItem(item.id, 'service', event.target.value); updateReceiptItem(item.id, 'staff', selected?.staff || item.staff || 'Meena'); updateReceiptItem(item.id, 'price', selected?.price || item.price); }}>{services.map((service) => <option key={service.id}>{service.name}</option>)}</select></label><label>Staff<select value={item.staff} onChange={(event) => updateReceiptItem(item.id, 'staff', event.target.value)}>{staffList.map((member) => <option key={member.id}>{member.name}</option>)}</select></label><label className="compact-field">Qty<input type="number" min="1" value={item.quantity} onChange={(event) => updateReceiptItem(item.id, 'quantity', event.target.value)} /></label><label className="price-field">Price<input type="number" min="0" value={item.price} onChange={(event) => updateReceiptItem(item.id, 'price', event.target.value)} /></label><button type="button" className="remove-item" aria-label={`Remove service ${index + 1}`} onClick={() => removeReceiptItem(item.id)}>×</button></div>)}</div></section>
+            <section className="panel receipt-section"><div className="panel-header"><span className="form-status">{paymentMethod}</span></div><div className="payment-methods receipt-payment-methods">{['Cash', 'Card', 'GPay / UPI', 'Other'].map((method) => <button type="button" key={method} className={`method-pill ${paymentMethod === method ? 'selected' : ''}`} onClick={() => { setPaymentMethod(method); if (method === 'Cash') updateReceipt('tax', '0'); }}>{method}</button>)}</div><div className="form-grid adjustment-grid classic-fields"><label>Discount (₹)<input type="number" min="0" value={receipt.discount} onChange={(event) => updateReceipt('discount', event.target.value)} /></label><label>Tax (%){paymentMethod === 'Cash' && <small className="tax-cash-note"> GST not applicable on cash</small>}<input type="number" min="0" max="100" value={paymentMethod === 'Cash' ? '0' : receipt.tax} onChange={(event) => updateReceipt('tax', event.target.value)} disabled={paymentMethod === 'Cash'} /></label><label>Membership fee (₹)<input type="number" min="0" value={receipt.memberFee} onChange={(event) => updateReceipt('memberFee', event.target.value)} /></label><label>Towel kit cashout (₹)<input type="number" min="0" value={receipt.towelKit} onChange={(event) => updateReceipt('towelKit', event.target.value)} /></label><label className="notes-field">Notes<input value={receipt.notes} onChange={(event) => updateReceipt('notes', event.target.value)} placeholder="Optional note for the client" /></label></div><p className="receipt-accounting-note">Saved receipts appear in the grid for {formatDisplayDate(businessDate)}. There is no edit. Delete and re-enter if needed.</p></section>
             {receiptError && <div className="form-error" role="alert">{receiptError}</div>}
             <button className="primary-button save-receipt-button" type="submit">Save receipt <span>→</span></button>
           </fieldset>
-          <aside className="receipt-preview"><div className="preview-top"><span className="preview-logo">B</span><div><strong>Bizora</strong><span>Front desk</span></div><span className="preview-label">{dayIsClosed ? 'CLOSED' : 'OPEN'}</span></div><div className="preview-divider" /><div className="preview-heading"><div><p className="panel-kicker">Today</p><h3>{money(todayReceiptTotal)}</h3></div><span>{todayReceipts.length} {todayReceipts.length === 1 ? 'entry' : 'entries'}</span></div><div className="preview-client"><span>Working date</span><strong>{formatDisplayDate(businessDate)}</strong><small>Close the day after reconciling all entries.</small></div><div className="preview-totals"><div><span>Subtotal</span><strong>₹{receiptSubtotal.toLocaleString('en-IN')}</strong></div><div><span>Discount</span><strong>- ₹{receiptDiscount.toLocaleString('en-IN')}</strong></div><div><span>Tax ({receipt.tax}%)</span><strong>₹{receiptTax.toLocaleString('en-IN')}</strong></div><div className="preview-total"><span>This entry</span><strong>₹{receiptTotal.toLocaleString('en-IN')}</strong></div></div><div className="preview-payment"><span>Payment via</span><strong>{paymentMethod}</strong></div><p className="preview-thanks">Key in, save, then check the grid.</p></aside>
+          <aside className="receipt-preview"><div className="preview-top"><span className="preview-logo">{businessProfile.name[0] || 'B'}</span><div><strong>{businessProfile.name}</strong><span>Front desk</span></div><span className="preview-label">{dayIsClosed ? 'CLOSED' : 'OPEN'}</span></div><div className="preview-divider" /><div className="preview-heading"><div><p className="panel-kicker">Today</p><h3>{money(todayReceiptTotal)}</h3></div><span>{todayReceipts.length} {todayReceipts.length === 1 ? 'entry' : 'entries'}</span></div><div className="preview-client"><span>Working date</span><strong>{formatDisplayDate(businessDate)}</strong><small>Close the day after reconciling all entries.</small></div><div className="preview-totals"><div><span>Subtotal</span><strong>₹{receiptSubtotal.toLocaleString('en-IN')}</strong></div><div><span>Discount</span><strong>- ₹{receiptDiscount.toLocaleString('en-IN')}</strong></div><div><span>Tax ({receipt.tax}%)</span><strong>₹{receiptTax.toLocaleString('en-IN')}</strong></div><div className="preview-total"><span>This entry</span><strong>₹{receiptTotal.toLocaleString('en-IN')}</strong></div></div><div className="preview-payment"><span>Payment via</span><strong>{paymentMethod}</strong></div><p className="preview-thanks">Key in, save, then check the grid.</p></aside>
         </form>
         <section className="panel receipt-grid-panel"><div className="panel-header"><div><p className="panel-kicker">Entered today</p><h2>Receipts grid</h2></div><span className="form-status">{money(todayReceiptTotal)}</span></div>{todayReceipts.length ? <div className="table-wrap"><table><thead><tr><th>Receipt</th><th>Client</th><th>Services</th><th>Method</th><th>Amount</th><th>Entered by</th><th>Time</th><th /></tr></thead><tbody>{todayReceipts.slice().reverse().map((entry) => <tr key={entry.id}><td>{entry.number}</td><td>{entry.client}<small className="table-sub">{entry.phone || 'No phone'}</small></td><td>{entry.items.map((item) => item.service).join(', ')}</td><td>{entry.method}</td><td><strong>{money(entry.total)}</strong></td><td>{entry.createdBy}</td><td>{new Date(entry.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</td><td>{dayIsClosed ? null : <button type="button" className="secondary-button small" onClick={() => deleteReceiptEntry(entry.id)}>Delete</button>}</td></tr>)}</tbody></table></div> : <div className="empty-state">No receipts for this date yet.</div>}</section>
         <section className="panel receipt-audit-panel"><div className="panel-header"><div><p className="panel-kicker">Audit</p><h2>Deleted receipts</h2></div><span className="form-status">{deletionLogs.length} logged</span></div>{deletionLogs.length ? <div className="audit-list">{deletionLogs.slice(0, 8).map((log) => <div className="audit-item" key={log.id}><span>{log.what}<small>Deleted by {log.who} · {new Date(log.when).toLocaleString('en-IN')}</small></span></div>)}</div> : <div className="empty-state">No deletions logged yet.</div>}</section>
+      </section> : page === 'Targets' ? <section className="targets-page">
+        <div className="receipt-page-header"><div><p className="panel-kicker">Setup</p><h2>Settings</h2><p className="page-intro">Set the sales target for any month and configure WhatsApp report delivery. This appears on the Daily Receipts page and end of day reports.</p></div></div>
+        <div className="membership-layout">
+          <section className="panel receipt-section">
+            <div className="panel-header"><div><p className="panel-kicker">New / update target</p><h2>Monthly target</h2></div><span className="form-status">Required</span></div>
+            <form className="settings-form" onSubmit={saveMonthlyTarget}>
+              <label>Month<input type="month" value={targetForm.month} onChange={(event) => setTargetForm({ ...targetForm, month: event.target.value })} required /></label>
+              <label>Target amount (₹)<input type="number" min="1" value={targetForm.amount} onChange={(event) => setTargetForm({ ...targetForm, amount: event.target.value })} placeholder="e.g. 20000000" required /></label>
+              <label>Achieved so far already (₹) — optional opening figure<input type="number" min="0" value={targetForm.baseline} onChange={(event) => setTargetForm({ ...targetForm, baseline: event.target.value })} placeholder="e.g. 17000000" /></label>
+              {targetError && <div className="form-error" role="alert">{targetError}</div>}
+              <button className="primary-button" type="submit">Save target <span>→</span></button>
+            </form>
+          </section>
+          <section className="panel membership-list">
+            <div className="panel-header"><div><p className="panel-kicker">Directory sheet</p><h2>Saved targets</h2></div><span className="form-status">{Object.keys(monthlyTargets).length} months</span></div>
+            {Object.keys(monthlyTargets).length ? <div className="directory-sheet-scroll"><table className="directory-sheet"><thead><tr><th>#</th><th>Month</th><th>Target</th><th>Achieved so far</th><th>Actions</th></tr></thead><tbody>{Object.keys(monthlyTargets).sort().reverse().map((monthKey, index) => <tr key={monthKey}><td>{index + 1}</td><td><strong>{formatMonthLabel(monthKey)}</strong></td><td>{money(getMonthlyTarget(monthKey))}</td><td>{money(achievedForMonth(monthKey, `${monthKey}-31`))}</td><td><button type="button" className="secondary-button small" onClick={() => deleteMonthlyTarget(monthKey)}>Remove</button></td></tr>)}</tbody></table></div> : <div className="empty-state">No targets set yet.</div>}
+          </section>
+        </div>
+        <section className="panel receipt-section">
+          <div className="panel-header"><div><p className="panel-kicker">Send report</p><h2>WhatsApp delivery number(s)</h2></div><span className="form-status">{whatsappNumber ? 'Configured' : 'Not set'}</span></div>
+          <form className="settings-form" onSubmit={saveWhatsappNumber}>
+            <label>WhatsApp numbers (with country code, comma separated for more than one)<input value={whatsappNumberDraft} onChange={(event) => setWhatsappNumberDraft(event.target.value.replace(/[^\d+,\s]/g, ''))} placeholder="e.g. 919876543210, 919123456780" /></label>
+            <button className="primary-button" type="submit">Save number(s) <span>→</span></button>
+          </form>
+          <p className="receipt-accounting-note">The "Send report" button on EOD Reports opens WhatsApp with the report pre-filled to every number listed above (comma separated) — press Send inside WhatsApp for each to deliver it. To send to a group, add one of these numbers to the group, or open WhatsApp normally and paste the pre-filled message into the group chat (WhatsApp does not allow websites to auto-post into group chats).</p>
+        </section>
+        <div className="membership-layout">
+          <section className="panel receipt-section">
+            <div className="panel-header"><div><p className="panel-kicker">{editingPackageId ? 'Update package' : 'New package'}</p><h2>Membership packages</h2></div><span className="form-status">Required</span></div>
+            <form className="settings-form" onSubmit={savePackage}>
+              <label>Package name<input value={packageForm.name} onChange={(event) => setPackageForm({ ...packageForm, name: event.target.value })} placeholder="e.g. Basic 8" required /></label>
+              <label>Total sessions<input type="number" min="1" value={packageForm.sessions} onChange={(event) => setPackageForm({ ...packageForm, sessions: event.target.value })} required /></label>
+              <label>Package price (₹)<input type="number" min="1" value={packageForm.price} onChange={(event) => setPackageForm({ ...packageForm, price: event.target.value })} required /></label>
+              <label>Validity (months)<input type="number" min="1" value={packageForm.validityMonths} onChange={(event) => setPackageForm({ ...packageForm, validityMonths: event.target.value })} required /></label>
+              <label>Notes<input value={packageForm.notes} onChange={(event) => setPackageForm({ ...packageForm, notes: event.target.value })} placeholder="Optional" /></label>
+              {packageError && <div className="form-error" role="alert">{packageError}</div>}
+              <button className="primary-button" type="submit">{editingPackageId ? 'Update package' : 'Create package'} <span>→</span></button>
+              {editingPackageId && <button type="button" className="secondary-button small" onClick={() => { setEditingPackageId(null); setPackageForm({ name: '', sessions: '8', price: '12000', validityMonths: '6', notes: '' }); }}>Cancel edit</button>}
+            </form>
+          </section>
+          <section className="panel membership-list">
+            <div className="panel-header"><div><p className="panel-kicker">Directory sheet</p><h2>Configured packages</h2></div><span className="form-status">{membershipPackages.length} packages</span></div>
+            {membershipPackages.length ? <div className="directory-sheet-scroll"><table className="directory-sheet"><thead><tr><th>#</th><th>Package</th><th>Sessions</th><th>Price</th><th>Validity</th><th>Status</th><th>Actions</th></tr></thead><tbody>{membershipPackages.map((pkg, index) => <tr key={pkg.id}><td>{index + 1}</td><td><strong>{pkg.name}</strong></td><td>{pkg.sessions}</td><td>{money(pkg.price)}</td><td>{pkg.validityMonths} months</td><td><span className={`membership-status ${pkg.active ? 'complete' : ''}`}>{pkg.active ? 'Active' : 'Inactive'}</span></td><td className="excel-actions-cell"><button type="button" className="excel-edit-btn" onClick={() => editPackage(pkg)} title="Edit package" aria-label="Edit package">✎</button><button type="button" className={`excel-icon-btn ${pkg.active ? 'deactivate' : 'activate'}`} onClick={() => togglePackageActive(pkg.id)} title={pkg.active ? 'Deactivate package' : 'Activate package'} aria-label={pkg.active ? 'Deactivate package' : 'Activate package'}>{pkg.active ? '⏻' : '✓'}</button></td></tr>)}</tbody></table></div> : <div className="empty-state">No packages configured yet.</div>}
+          </section>
+        </div>
+        <section className="panel receipt-section">
+          <div className="panel-header"><div><p className="panel-kicker">Data safety</p><h2>Backup &amp; restore</h2></div><span className="form-status">Stored on this device only</span></div>
+          <p className="receipt-accounting-note">All data lives in this browser's storage. Download a backup regularly, and restore it here (or on another device) if data is ever lost or you switch computers.</p>
+          <div className="backup-restore-actions">
+            <button type="button" className="secondary-button" onClick={backupAllData}>⬇ Download backup</button>
+            <label className="secondary-button restore-upload-label">⬆ Restore from file<input type="file" accept="application/json" onChange={restoreAllData} hidden /></label>
+          </div>
+          {restoreError && <div className="form-error" role="alert">{restoreError}</div>}
+        </section>
+      </section> : page === 'EOD Reports' ? <section className="eod-reports-page">
+        <div className="receipt-page-header"><div><p className="panel-kicker">Close of day</p><h2>End of Day Reports</h2><p className="page-intro">Generated automatically each time a business day is closed.</p></div><span className="form-status">{eodReports.length} reports</span></div>
+        {eodReports.length ? <div className="daily-lower-grid">
+          <section className="panel directory-sheet-panel">
+            <div className="panel-header"><div><p className="panel-kicker">Directory sheet</p><h2>Saved reports</h2></div></div>
+            <div className="directory-sheet-scroll"><table className="directory-sheet"><thead><tr><th>#</th><th>Date</th><th>Closing balance</th><th></th></tr></thead><tbody>{eodReports.map((report, index) => <tr key={report.id} className={selectedEodReportId === report.id ? 'active-row' : ''}><td>{index + 1}</td><td>{report.day}</td><td>{money(report.closingBalance)}</td><td><button type="button" className="secondary-button small" onClick={() => setSelectedEodReportId(report.id)}>View</button></td></tr>)}</tbody></table></div>
+          </section>
+          {(() => {
+            const report = eodReports.find((item) => item.id === selectedEodReportId) || eodReports[0];
+            if (!report) return null;
+            return <section className="panel eod-report-panel">
+              <div className="panel-header"><div><p className="panel-kicker">End of day report</p><h2>{report.day}</h2></div><button type="button" className="secondary-button small" onClick={() => window.print()}>🖨 Print</button></div>
+              <table className="eod-report-table">
+                <tbody>
+                  <tr><td>Opening balance</td><td>{money(report.openingBalance)}</td></tr>
+                  <tr><td>Cash</td><td>{money(report.cash)}</td></tr>
+                  <tr><td>Card</td><td>{money(report.card)}</td></tr>
+                  <tr><td>GPay</td><td>{money(report.gpay)}</td></tr>
+                  <tr className="eod-row-strong"><td>Total receipts</td><td>{money(report.receiptsSubtotal)}</td></tr>
+                  <tr><td>Towel cash</td><td>{money(report.towelCash)}</td></tr>
+                  <tr className="eod-row-strong"><td>Total receipts after towel cash</td><td>{money(report.receiptsAfterTowel)}</td></tr>
+                  <tr><td>Payment (expenses)</td><td>{money(report.paymentsForDay)}</td></tr>
+                  <tr className="eod-row-final"><td>Closing balance</td><td>{money(report.closingBalance)}</td></tr>
+                  <tr className="eod-row-spacer"><td colSpan={2} /></tr>
+                  <tr><td>Target</td><td>{money(report.targetAmount)}</td></tr>
+                  <tr><td>Achieved so far</td><td>{money(report.achievedSoFar)}</td></tr>
+                  <tr className="eod-row-spacer"><td colSpan={2} /></tr>
+                  <tr><td>Total clients served</td><td>{report.totalClientsServed}</td></tr>
+                  <tr><td>Regular paid clients</td><td>{report.regularPaidClients}</td></tr>
+                  <tr><td>Membership clients served</td><td>{report.membershipClientsServed}</td></tr>
+                  <tr><td>Membership sessions used</td><td>{report.membershipSessionsUsed}</td></tr>
+                  <tr><td>Membership revenue collected today</td><td>{money(report.membershipRevenueToday)}</td></tr>
+                </tbody>
+              </table>
+              <div className="eod-report-actions">
+                <button type="button" className="primary-button" onClick={() => sendEodReport(report.id)}>📲 Send report on WhatsApp <span>→</span></button>
+                {report.sent && <span className="form-status">Sent · {new Date(report.sentAt).toLocaleString('en-IN')}</span>}
+              </div>
+              <p className="preview-thanks">Closed by {report.closedBy} · {new Date(report.closedAt).toLocaleString('en-IN')}</p>
+            </section>;
+          })()}
+        </div> : <div className="empty-state">No end of day reports yet. Close a business day to generate one.</div>}
       </section> : <section className="panel page-placeholder"><p className="panel-kicker">Coming soon</p><h2>{page}</h2><p>This module is not active yet.</p><button className="primary-button" onClick={() => setPage(userRole === 'Frontdesk' ? 'Appointments' : 'Dashboard')}>Back</button></section>}
       {notice && <div className="toast">{notice}</div>}
     </main>
