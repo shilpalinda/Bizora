@@ -1,7 +1,9 @@
 {
   "name": "bizora-server",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.4.42",
+  "versionStamp": "01.04.042",
+  "publicVersion": "01.04",
   "type": "module",
   "scripts": {
     "start": "node index.js",
