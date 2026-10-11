@@ -1,5 +1,11 @@
 # Bizora — Testing Strategy & Test Plan
 
+> Historical plan: this predates internal version `01.04.042`. Its client-only
+> scope and several UI expectations no longer describe the current platform.
+> Use the [master strategy](MASTER_TESTING_STRATEGY.md),
+> [detailed plan](DETAILED_TESTING_PLAN.md) and
+> [current case catalogue](COMPREHENSIVE_TEST_CASES.md) for new test runs.
+
 ## 1. Objective
 Validate that every module of the Bizora spa/salon management app (src/App.jsx) works correctly for all user roles, handles valid (positive) and invalid (negative) input correctly, persists data reliably in `localStorage`, and enforces business rules (closed-day locking, GST rules, membership session limits, etc.).
 

@@ -1,5 +1,10 @@
 # Bizora — Test Execution Results
 
+> Historical evidence only: the results below are not a verification of internal
+> version `01.04.042` and have not been rerun as part of the new documentation.
+> New runs must use the [current case catalogue](COMPREHENSIVE_TEST_CASES.md) and
+> [execution record template](DETAILED_TESTING_PLAN.md), with fresh evidence.
+
 Executed against the running app at `http://localhost:5173/` (manager@bizora.com), per [TESTING_PLAN.md](TESTING_PLAN.md), across two testing sessions. Each case below is marked **PASS**, **FAIL**, or **INFO** (native-browser-validation substituted for the app's own message — functionally equivalent, no defect). A few file-download cases are marked **PARTIAL** (in-app success flow confirmed, but the actual file could not be verified landing on disk from this sandboxed browser).
 
 ## Summary
@@ -122,4 +127,3 @@ Executed against the running app at `http://localhost:5173/` (manager@bizora.com
 - Several validations are enforced twice: once by native HTML5 attributes (`required`, `pattern`, `min`) and once by the app's own JS checks. The native layer fires first in real browsers — logged as **INFO**, not a gap.
 - File downloads (backup JSON, Excel exports) triggered their in-app success state correctly every time, but the resulting files could not be located on disk from this sandboxed browser profile in the current session. The download code (`Blob` + `<a download>`, `XLSX.writeFile`) is standard and was verified via source review — recommend a manual confirmation pass on a real device/browser profile.
 - A file-chooser dialog (`<input type="file">`) **does** work reliably via `handle_dialog` with `selectFiles`, confirmed by successfully testing both valid and corrupt backup restores.
-

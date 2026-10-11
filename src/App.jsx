@@ -3,6 +3,8 @@ import * as XLSX from 'xlsx';
 import StaffAttendance, { WEEKDAY_SHORT } from './StaffAttendance.jsx';
 import DayReport from './DayReport.jsx';
 import { calculateMembershipPayment, formatMembershipMoney } from './membership-payment.js';
+import { isMemberSession, summarizeTransactions, transactionAmount } from './transaction-summary.js';
+import { receiptMembershipState, resolveReceiptMembership as lookupReceiptMembership } from './receipt-membership.js';
 import { isPrivacyActive, PrivacyControls, PrivacyPlaceholder, usePrivacyDisplay } from './PrivacyDisplay.jsx';
 import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Bell, CalendarClock, CalendarRange, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Contact, Download, FileBarChart, Filter, Gem, Inbox, Info, LayoutDashboard, Lock, Pencil, Plus, Printer, ReceiptText, RotateCcw, Search, Settings, Sparkles, Trash2, UserPlus, UsersRound, Wallet, X } from 'lucide-react';
 
@@ -79,20 +81,33 @@ const getAppointmentTimeParts = (time) => {
 const receiptPaymentModes = ['GPay', 'Cash', 'Card', 'Member'];
 const receiptDurations = ['30 min', '45 min', '60 min', '90 min', '120 min'];
 // [key, header, kind]; widths live in styles.css (.rx-col-<key>) so breakpoints can tighten them.
-const receiptColumns = [['date', 'Date', 'date'], ['client', 'Client', 'text'], ['phone', 'Phone', 'text'], ['duration', 'Duration', 'text'], ['service', 'Service', 'text'], ['membership', 'Membership', 'text'], ['sessionNumber', 'Session', 'text'], ['price', 'Price', 'num'], ['method', 'Payment', 'text'], ['taxAmount', 'Tax', 'num'], ['staff', 'Staff', 'text'], ['towelKit', 'Towel Kit', 'num'], ['notes', 'Notes', 'text']];
+const receiptColumns = [['date', 'Date', 'date'], ['client', 'Client', 'text'], ['phone', 'Phone', 'text'], ['duration', 'Dur.', 'text'], ['membership', 'Member', 'text'], ['price', 'Price', 'num'], ['method', 'Payment', 'text'], ['taxAmount', 'Tax', 'num'], ['staff', 'Staff', 'text'], ['towelKit', 'Towel', 'num'], ['notes', 'Notes', 'text']];
 const navIconComponents = { Dashboard: LayoutDashboard, Appointments: CalendarClock, 'Daily Receipts': ReceiptText, 'Daily Payments (Exp)': Wallet, 'Membership Plan': Gem, Settings, 'Client Directory': Contact, Team: UsersRound, Menu: Sparkles, 'Daily Report': FileBarChart, 'Daily Summary': CalendarRange };
 const formatGridDate = (iso) => { const [year, month, day] = (iso || '').split('-'); return day ? `${day}/${month}/${year.slice(2)}` : '—'; };
-const receiptCellValue = (row, key) => key === 'date' ? formatGridDate(row.date) : key === 'membership' ? (row.membership || '—') : key === 'transactionType' ? (row.transactionType || 'Normal Payment') : key === 'sessionNumber' ? (row.sessionNumber || '—') : key === 'price' || key === 'taxAmount' || key === 'towelKit' ? money(row[key]) : row[key] || '—';
+const receiptTypeLabel = (row) => isMemberSession(row) ? 'Member / No Payment' : row.transactionType === 'New Membership' ? 'New Membership' : 'Normal Payment';
+const receiptRegisterNotes = (row) => {
+  const membershipDetails = row.membership || row.packageName ? [
+    row.membership || row.packageName,
+    row.memberId,
+    row.sessionNumber ? `Session used: ${row.sessionNumber}` : '',
+    row.membershipStatus
+  ].filter(Boolean) : [];
+  return [...membershipDetails, row.notes].filter(Boolean).join(' · ');
+};
+const receiptRegisterService = (row) => [row.service, receiptTypeLabel(row)].filter(Boolean).join(' · ');
+const receiptRegisterMembership = (row) => isMemberSession(row) ? `✓ Member ${row.sessionNumber || '—'}` : row.transactionType === 'New Membership' ? row.membership || '—' : '—';
+const receiptRegisterPayment = (row) => isMemberSession(row) ? 'Membership' : row.method;
+const receiptRegisterDate = (date) => { const [year, month, day] = (date || '').split('-'); return day ? `${day}-${month}-${year}` : '—'; };
+const receiptCellValue = (row, key) => key === 'date' ? receiptRegisterDate(row.date) : key === 'membership' ? receiptRegisterMembership(row) : key === 'method' ? receiptRegisterPayment(row) : key === 'notes' ? receiptRegisterNotes(row) || '—' : key === 'price' || key === 'taxAmount' || key === 'towelKit' ? money(row[key]) : row[key] || '—';
 const receiptCellTitle = (row, key, value) => {
   if (key === 'duration' && row.inTime) return `${row.duration} · ${formatTime12h(row.inTime)} – ${formatTime12h(row.outTime)}`;
   if (key === 'taxAmount') return row.taxAmount ? `${money(row.taxAmount)} (${row.taxRate}% of ${money(row.price)})` : 'No tax';
-  if (key === 'membership') return row.membership ? `${row.membership}${row.memberId ? ` · ${row.memberId}` : ''}` : 'Not a membership transaction';
+  if (key === 'service') return receiptRegisterService(row);
   if (key === 'price' && row.method === 'Member') return 'Included in membership';
   return key === 'date' ? row.date : String(value);
 };
 const receiptCellContent = (row, key, value) => {
-  if (key === 'membership' && row.membership) return <span className="rx-member-tag"><Check size={11} strokeWidth={2.6} aria-hidden="true" />{value}</span>;
-  if (key === 'transactionType') return <span className={`rx-transaction-type rx-type-${row.transactionType === 'New Membership' ? 'membership' : row.transactionType === 'Membership Session' ? 'member' : 'paid'}`}>{value}</span>;
+  if (key === 'membership' && isMemberSession(row)) return <span className="rx-member-badge">{value}</span>;
   if (key === 'method') return <span className={`rx-pay rx-pay-${String(row.method).toLowerCase().replace(/[^a-z]/g, '')}`}>{value}</span>;
   return value;
 };
@@ -116,8 +131,9 @@ const toReceiptRow = (entry) => {
     membership: entry.membership || (entry.packageName ? `${entry.packageName} · ${entry.sessionsTotal || entry.sessions || ''} sessions` : entry.method === 'Member' ? 'Membership' : ''),
     sessionNumber: entry.sessionNumber ? `${entry.sessionNumber}/${entry.sessionsTotal || entry.sessions || ''}` : '',
     staff: entry.staff ?? [...new Set(items.map((item) => item.staff))].join(', '),
-    price: entry.price ?? (entry.cash || 0) + (entry.card || 0) + (entry.gpay || 0),
-    taxAmount: entry.taxAmount ?? (entry.cardGst || 0) + (entry.gpayGst || 0),
+    price: isMemberSession(entry) ? 0 : entry.price ?? (entry.cash || 0) + (entry.card || 0) + (entry.gpay || 0),
+    taxAmount: isMemberSession(entry) ? 0 : entry.taxAmount ?? (entry.cardGst || 0) + (entry.gpayGst || 0),
+    total: transactionAmount(entry),
     taxRate: Number(entry.tax) || 0,
     towelKit: entry.towelKit || 0
   };
@@ -275,6 +291,7 @@ const buildEodMessage = (report, businessName = 'Bizora') => [
   `Membership collection: ${money(report.membershipCollection || 0)}`,
   `Normal service collection: ${money(report.normalServiceCollection || 0)}`,
   `₹0 membership visits: ${report.zeroMembershipVisits || 0}`,
+  `Membership session collection today: ${money(0)}`,
   '━━━━━━━━━━━━━━━━━━',
   `✅ Closed by ${report.closedBy} · ${new Date(report.closedAt).toLocaleString('en-IN')}`
 ].join('\n');
@@ -558,20 +575,21 @@ function App() {
   const applyReceiptToDailyRows = (entry, sign) => setDailyRows((rows) => {
     const fields = ['cash', 'card', 'cardGst', 'gpay', 'gpayGst', 'memberFee', 'towelKit'];
     const countField = entry.method === 'Member' ? 'memberCount' : 'clientCount';
-    if (rows.some((row) => row.date === entry.date)) {
-      return rows.map((row) => row.date !== entry.date ? row : { ...row, ...Object.fromEntries(fields.map((field) => [field, Math.max(0, (row[field] || 0) + sign * (entry[field] || 0))])), [countField]: Math.max(0, (row[countField] || 0) + sign) });
+    const rowIndex = rows.findIndex((row) => row.date === entry.date);
+    if (rowIndex !== -1) {
+      return rows.map((row, index) => index !== rowIndex ? row : { ...row, ...Object.fromEntries(fields.map((field) => [field, Math.max(0, (row[field] || 0) + sign * (entry[field] || 0))])), [countField]: Math.max(0, (row[countField] || 0) + sign) });
     }
     if (sign < 0) return rows;
     const day = new Date(`${entry.date}T00:00:00`).toLocaleDateString('en-IN', { weekday: 'long' });
     return [...rows, { id: Date.now() + 1, day, date: entry.date, memberCount: 0, clientCount: 0, [countField]: 1, ...Object.fromEntries(fields.map((field) => [field, entry[field] || 0])) }].sort((first, second) => first.date.localeCompare(second.date));
   });
   const adjustMembershipSessions = (membershipId, delta) => setMemberships((records) => {
-    const nextRecords = records.map((item) => item.id === membershipId ? { ...item, usedSessions: Math.min(item.sessions, Math.max(0, (item.usedSessions || 0) + delta)) } : item);
+    const nextRecords = records.map((item) => item.id === membershipId ? { ...item, usedSessions: Math.min(Number(item.sessions), Math.max(0, Number(item.usedSessions || 0) + delta)) } : item);
     saveJSON(STORAGE.memberships, nextRecords);
     return nextRecords;
   });
   const upsertReceiptMembershipVisit = (entry, membership) => setMembershipVisits((visits) => {
-    const visit = { id: `visit-${entry.id}`, receiptId: entry.id, membershipId: membership.id, memberId: membership.memberId, name: membership.name, phone: membership.phone, packageName: membership.packageName, date: entry.date, time: formatTime12h(entry.inTime), service: entry.service, staff: entry.staff, sessionNumber: entry.sessionNumber, remainingAfter: membership.sessions - entry.sessionNumber, frontDeskUser: userEmail || userRole, notes: entry.notes };
+    const visit = { id: `visit-${entry.id}`, receiptId: entry.id, appointmentId: entry.appointmentId, membershipId: membership.id, memberId: membership.memberId, name: membership.name, phone: membership.phone, packageName: membership.packageName, date: entry.date, time: formatTime12h(entry.inTime), service: entry.service, staff: entry.staff, sessionNumber: entry.sessionNumber, remainingAfter: membership.sessions - entry.sessionNumber, frontDeskUser: userEmail || userRole, notes: entry.notes };
     const nextVisits = visits.some((item) => item.receiptId === entry.id) ? visits.map((item) => item.receiptId === entry.id ? { ...item, ...visit } : item) : [visit, ...visits];
     saveJSON(STORAGE.membershipVisits, nextVisits);
     return nextVisits;
@@ -581,23 +599,8 @@ function App() {
     saveJSON(STORAGE.membershipVisits, nextVisits);
     return nextVisits;
   });
-  const resolveReceiptMembership = (form, existing) => {
-    const phone = (form.phone || '').replace(/\D/g, '');
-    const name = form.client.trim().toLowerCase();
-    if (phone.length !== 10 && !name) return { state: 'needs-client' };
-    const candidates = memberships.filter((item) => phone.length === 10 ? item.phone === phone : item.name.trim().toLowerCase() === name);
-    if (existing?.method === 'Member' && !existing.deleted) {
-      const current = candidates.find((item) => item.id === existing.membershipId);
-      if (current) return { state: 'already-redeemed', membership: current, sessionNumber: existing.sessionNumber };
-    }
-    const redeemable = candidates.filter(canRedeemSession).sort((first, second) => (first.expiryDate || '').localeCompare(second.expiryDate || ''));
-    if (redeemable.length) return { state: 'ready', membership: redeemable[0], sessionNumber: (redeemable[0].usedSessions || 0) + 1 };
-    if (!candidates.length) return { state: 'none' };
-    const latest = [...candidates].sort((first, second) => (second.startDate || '').localeCompare(first.startDate || ''))[0];
-    const status = getMembershipStatus(latest);
-    return { state: status === 'Expired' ? 'expired' : status === 'Cancelled' ? 'cancelled' : 'exhausted', membership: latest };
-  };
-  const memberLookupErrors = { 'needs-client': 'Enter the client phone number to find their membership.', none: 'No active membership found for this client.', exhausted: 'Membership sessions exhausted.', expired: 'This membership has expired.', cancelled: 'This membership has been cancelled.' };
+  const resolveReceiptMembership = (form, existing) => lookupReceiptMembership(form, existing, memberships, businessDate);
+  const memberLookupErrors = { 'needs-client': 'Enter the client phone number to find their membership.', ambiguous: 'Multiple clients have this name. Enter the 10-digit phone number to select the correct membership.', none: 'No active membership found for this client.', exhausted: 'Membership sessions exhausted.', expired: 'This membership has expired.', cancelled: 'This membership has been cancelled.', 'not-started': 'This membership has not started yet.' };
   const closeReceiptForm = () => {
     setShowReceiptForm(false);
     setEditingReceiptId(null);
@@ -637,10 +640,15 @@ function App() {
     if (key === 'date') return `${row.date} ${row.createdAt || ''}`;
     if (key === 'duration') return parseInt(row.duration, 10) || 0;
     if (key === 'price' || key === 'taxAmount' || key === 'towelKit') return row[key];
-    return String(row[key] || '').toLowerCase();
+    return String(key === 'notes' ? receiptRegisterNotes(row) : key === 'service' ? receiptRegisterService(row) : key === 'membership' ? receiptRegisterMembership(row) : key === 'method' ? receiptRegisterPayment(row) : row[key] || '').toLowerCase();
   };
-  const toReceiptGridRows = (entries) => entries.map(toReceiptRow)
-    .filter((row) => (receiptMethodFilter === 'All' || row.method === receiptMethodFilter) && (receiptStaffFilter === 'All' || row.staff.split(', ').includes(receiptStaffFilter)) && (!receiptQuery || [row.client, row.phone, row.service, row.staff, row.notes, row.number, row.method].some((value) => String(value || '').toLowerCase().includes(receiptQuery))))
+  const toReceiptDisplayRow = (entry) => {
+    const row = toReceiptRow(entry);
+    const membership = memberships.find((item) => item.id === entry.membershipId);
+    return { ...row, membershipStatus: isMemberSession(entry) ? 'Membership Session Used' : membership ? getMembershipStatus(membership) : row.membershipStatus || '' };
+  };
+  const toReceiptGridRows = (entries) => entries.map(toReceiptDisplayRow)
+    .filter((row) => (receiptMethodFilter === 'All' || row.method === receiptMethodFilter) && (receiptStaffFilter === 'All' || row.staff.split(', ').includes(receiptStaffFilter)) && (!receiptQuery || [row.client, row.phone, receiptRegisterService(row), row.staff, receiptRegisterNotes(row), row.number, row.method].some((value) => String(value || '').toLowerCase().includes(receiptQuery))))
     .sort((first, second) => {
       const a = receiptSortValue(first, receiptSort.key);
       const b = receiptSortValue(second, receiptSort.key);
@@ -665,6 +673,7 @@ function App() {
     const existing = editingReceiptId ? receiptEntries.find((item) => item.id === editingReceiptId) : null;
     if (!businessDate || closedDates.includes(businessDate)) { setReceiptError('The current working day is closed. New receipts cannot be entered.'); return; }
     if (existing && existing.date !== businessDate) { setReceiptError('Only receipts from the current working day can be edited here.'); return; }
+    if (editingReceiptId && (!existing || existing.deleted)) { setReceiptError('This receipt is no longer active. Close the form and reopen an active receipt.'); return; }
     if (!client) { setReceiptError('Enter the client name.'); return; }
     if (form.phone && !/^\d{10}$/.test(form.phone)) { setReceiptError('Enter a valid 10-digit phone number, or leave it blank.'); return; }
     if (!form.duration) { setReceiptError('Choose the duration.'); return; }
@@ -704,9 +713,10 @@ function App() {
       taxAmount,
       towelKit,
       notes: form.notes.trim(),
-      memberFee: existing?.memberFee || 0,
+      memberFee: 0,
       ...splitReceiptPayment(form.method, price, taxAmount),
-      ...(membership ? { membershipId: membership.id, memberId: membership.memberId, sessionNumber: redeeming ? (membership.usedSessions || 0) + 1 : existing.sessionNumber, sessionsTotal: membership.sessions } : {}),
+      membershipStatus: membership ? 'Membership Session Used' : '',
+      ...(membership ? { membershipId: membership.id, memberId: membership.memberId, sessionNumber: lookup.sessionNumber, sessionsTotal: membership.sessions } : {}),
       total: price + taxAmount,
       deleted: false,
       createdAt: existing?.createdAt ?? now,
@@ -723,6 +733,8 @@ function App() {
     if (entry.date < dailyFrom || entry.date > dailyTo) { setDailyFrom(entry.date); setDailyTo(entry.date); }
     if (entry.phone) addClientRecord(entry.client, entry.phone);
     closeReceiptForm();
+    clearReceiptFilters();
+    setReceiptSort({ key: 'date', dir: 'desc' });
     showNotice(existing ? 'Receipt updated successfully' : 'Receipt added successfully');
   };
   const confirmReceiptAction = () => {
@@ -737,6 +749,7 @@ function App() {
       showNotice('Receipt permanently deleted');
       return;
     }
+    if (entry.deleted) { showNotice('This receipt has already been deleted.', 'error'); return; }
     if (closedDates.includes(entry.date)) { showNotice('This day is closed. Receipts for closed days cannot be deleted.', 'error'); return; }
     persistReceiptEntries(receiptEntries.map((item) => item.id === id ? { ...item, deleted: true, deletedAt: new Date().toISOString(), deletedBy: userEmail || userRole } : item));
     applyReceiptToDailyRows(entry, -1);
@@ -753,8 +766,8 @@ function App() {
     let restoredEntry = { ...restored, deleted: false };
     const membership = entry.method === 'Member' ? memberships.find((item) => item.id === entry.membershipId) : null;
     if (entry.method === 'Member') {
-      if (!membership || !canRedeemSession(membership)) { showNotice('Cannot restore: this membership has no sessions available.', 'error'); return; }
-      restoredEntry = { ...restoredEntry, sessionNumber: (membership.usedSessions || 0) + 1, sessionsTotal: membership.sessions };
+      if (!membership || receiptMembershipState(membership, businessDate) !== 'ready') { showNotice('Cannot restore: this membership is not active or has no sessions available.', 'error'); return; }
+      restoredEntry = { ...restoredEntry, sessionNumber: Number(membership.usedSessions || 0) + 1, sessionsTotal: membership.sessions };
     }
     persistReceiptEntries(receiptEntries.map((item) => item.id === id ? restoredEntry : item));
     applyReceiptToDailyRows(entry, 1);
@@ -764,7 +777,7 @@ function App() {
   };
   const getMonthlyTarget = (monthKey) => monthlyTargets[monthKey]?.target || 0;
   const getMonthlyBaseline = (monthKey) => monthlyTargets[monthKey]?.achievedBaseline || 0;
-  const receiptEntryTotal = (entry) => entry.total ?? (entry.cash || 0) + (entry.card || 0) + (entry.gpay || 0) + (entry.memberFee || 0);
+  const receiptEntryTotal = transactionAmount;
   const achievedForMonth = (monthKey, uptoDateInclusive) => getMonthlyBaseline(monthKey) + activeReceiptEntries
     .filter((entry) => entry.date.startsWith(monthKey) && entry.date <= uptoDateInclusive)
     .reduce((total, entry) => total + receiptEntryTotal(entry), 0);
@@ -863,34 +876,22 @@ function App() {
     }
     if (!automatic && !window.confirm(`Close ${formatDisplayDate(closingDate)}? After closing you cannot change receipts for this day.`)) return;
     const todayEntries = activeReceiptEntries.filter((entry) => entry.date === closingDate);
+    const paidEntries = todayEntries.filter((entry) => !isMemberSession(entry));
     const priorReceiptsNet = activeReceiptEntries.filter((entry) => entry.date < closingDate).reduce((total, entry) => total + receiptEntryTotal(entry) - (entry.towelKit || 0), 0);
     const priorExpenses = dailyExpenses.filter((item) => item.date < closingDate).reduce((total, item) => total + item.amount, 0);
     const openingBalance = priorReceiptsNet - priorExpenses;
-    const cash = todayEntries.reduce((total, entry) => total + (entry.cash || 0), 0);
-    const card = todayEntries.reduce((total, entry) => total + (entry.card || 0), 0);
-    const gpay = todayEntries.reduce((total, entry) => total + (entry.gpay || 0), 0);
-    const memberFee = todayEntries.reduce((total, entry) => total + (entry.memberFee || 0), 0);
+    const cash = paidEntries.reduce((total, entry) => total + (entry.cash || 0), 0);
+    const card = paidEntries.reduce((total, entry) => total + (entry.card || 0), 0);
+    const gpay = paidEntries.reduce((total, entry) => total + (entry.gpay || 0), 0);
+    const memberFee = paidEntries.reduce((total, entry) => total + (entry.memberFee || 0), 0);
     const receiptsSubtotal = cash + card + gpay;
-    const gstCollected = todayEntries.reduce((total, entry) => total + (entry.cardGst || 0) + (entry.gpayGst || 0), 0);
+    const gstCollected = paidEntries.reduce((total, entry) => total + (entry.cardGst || 0) + (entry.gpayGst || 0), 0);
     const receiptsTotalWithTax = receiptsSubtotal + gstCollected;
     const paymentsForDay = dailyExpenses.filter((item) => item.date === closingDate).reduce((total, item) => total + item.amount, 0);
     const towelCash = todayEntries.reduce((total, entry) => total + (entry.towelKit || 0), 0);
     const receiptsAfterTowel = receiptsTotalWithTax - towelCash;
     const closingBalance = openingBalance + receiptsAfterTowel - paymentsForDay;
-    const memberEntries = todayEntries.filter((entry) => entry.method === 'Member' || entry.transactionType === 'Membership Session');
-    const legacyMembershipVisits = membershipVisits.filter((visit) => visit.date === closingDate && !visit.receiptId);
-    const memberKeys = [...memberEntries.map((entry) => entry.membershipId || entry.phone || entry.client), ...legacyMembershipVisits.map((visit) => visit.membershipId || visit.phone || visit.name)];
-    const membershipClientsServed = new Set(memberKeys.filter(Boolean)).size;
-    const membershipSessionsUsed = memberEntries.length + legacyMembershipVisits.length;
-    const regularPaidEntries = todayEntries.filter((entry) => entry.method !== 'Member');
-    const regularPaidClients = new Set(regularPaidEntries.map((entry) => entry.phone || entry.client).filter(Boolean)).size;
-    const newMembershipRecords = memberships.filter((membership) => membership.startDate === closingDate);
-    const newMembershipEntries = todayEntries.filter((entry) => entry.transactionType === 'New Membership');
-    const membershipRevenueToday = newMembershipRecords.reduce((total, membership) => total + (membership.totalAmount ?? membership.amount ?? 0), 0);
-    const normalServiceCollection = regularPaidEntries.filter((entry) => entry.transactionType !== 'New Membership').reduce((total, entry) => total + (entry.total ?? receiptEntryTotal(entry)), 0);
-    const membershipCollection = newMembershipEntries.reduce((total, entry) => total + (entry.total ?? receiptEntryTotal(entry)), 0) || membershipRevenueToday;
-    const totalCollection = normalServiceCollection + membershipCollection;
-    const totalClientsServed = new Set([...regularPaidEntries.map((entry) => entry.phone || entry.client), ...memberKeys].filter(Boolean)).size;
+    const clientSummary = summarizeTransactions(closingDate, receiptEntries, membershipVisits);
     const monthKey = getMonthKey(closingDate);
     const targetAmount = getMonthlyTarget(monthKey);
     const achievedSoFar = achievedForMonth(monthKey, closingDate);
@@ -908,17 +909,7 @@ function App() {
       paymentsForDay,
       towelCash,
       closingBalance,
-      totalClientsServed,
-      regularPaidClients,
-      membershipClientsServed,
-      membershipSessionsUsed,
-      newMembershipsSold: newMembershipRecords.length,
-      totalReceipts: todayEntries.length,
-      totalCollection,
-      membershipCollection,
-      normalServiceCollection,
-      zeroMembershipVisits: membershipSessionsUsed,
-      membershipRevenueToday,
+      ...clientSummary,
       monthKey,
       targetAmount,
       achievedSoFar,
@@ -951,8 +942,11 @@ function App() {
     showNotice(advanceNow ? `Day closed automatically. End of day report saved. Now working on ${formatDisplayDate(nextDate)}` : `Day closed. End of day report saved. The next working day begins at midnight.`);
   };
   useEffect(() => {
-    if (stateHydrated && businessDate < todayISO()) closeBusinessDay(true);
-  }, [businessDate, clockTick, stateHydrated]);
+    const needsReceiptRepair = memberships.some((membership) => !membership.receiptId && !receiptEntries.some((entry) =>
+      entry.membershipId === membership.id && entry.transactionType === 'New Membership')) ||
+      membershipVisits.some((visit) => !visit.receiptId && !receiptEntries.some((entry) => entry.visitId === visit.id));
+    if (stateHydrated && !needsReceiptRepair && businessDate < todayISO()) closeBusinessDay(true);
+  }, [businessDate, clockTick, stateHydrated, memberships, membershipVisits, receiptEntries]);
   const updateAppointment = (field, value) => setAppointment((current) => ({ ...current, [field]: field === 'date' && value < businessDate ? businessDate : value }));
   const updateAppointmentTime = (field, value) => setAppointment((current) => {
     const nextParts = { ...getAppointmentTimeParts(current.time), [field]: value };
@@ -1285,6 +1279,7 @@ function App() {
       cancelled: false,
       notes: details.notes || ''
     };
+    record.receiptId = `membership-sale-${record.id}`;
     setMemberships((records) => {
       const nextRecords = [...records, record];
       saveJSON(STORAGE.memberships, nextRecords);
@@ -1308,6 +1303,7 @@ function App() {
       memberId: record.memberId,
       sessionNumber: '',
       sessionsTotal: record.sessions,
+      membershipStatus: 'Active',
       staff: '',
       price: amount,
       method,
@@ -1332,7 +1328,7 @@ function App() {
     event.preventDefault();
     const pkg = membershipPackages.find((item) => item.id === Number(membershipForm.packageId));
     if (closedDates.includes(businessDate)) { setMembershipError('The current working day is closed. Memberships cannot be sold today.'); return; }
-    if (!membershipForm.name.trim() || membershipForm.phone.replace(/\D/g, '').length !== 10 || !pkg) {
+    if (!membershipForm.name.trim() || membershipForm.phone.replace(/\D/g, '').length !== 10 || !pkg?.active) {
       setMembershipError('Enter client details and select a membership package.');
       return;
     }
@@ -1384,21 +1380,28 @@ function App() {
   };
   const membershipsByPhone = (phone) => memberships.filter((membership) => membership.phone === phone.replace(/\D/g, ''));
   const openAppointmentMemberRedemption = (appointmentRecord) => {
+    if (appointmentRecord.date !== businessDate || closedDates.includes(businessDate)) { showNotice('Membership visits can only be recorded for the open working day.', 'error'); return; }
+    const linked = receiptEntries.find((entry) => entry.appointmentId === appointmentRecord.id && !entry.deleted && isMemberSession(entry));
+    if (linked) { setPage('Receipts'); showNotice(`This appointment already has receipt ${linked.number}.`); return; }
     const membership = membershipsByPhone(appointmentRecord.phone).find(canRedeemSession);
     if (!membership) { showNotice('No active membership with available sessions for this client.', 'error'); return; }
     setMembershipLookupPhone(membership.phone);
-    setRedeemForm({ membershipId: membership.id, service: appointmentRecord.service, staff: appointmentRecord.staff || staffList[0]?.name || '', notes: appointmentRecord.notes || '' });
+    setRedeemForm({ membershipId: membership.id, appointmentId: appointmentRecord.id, service: appointmentRecord.service, staff: appointmentRecord.staff || staffList[0]?.name || '', notes: appointmentRecord.notes || '' });
     setPage('Receipts');
   };
   const redeemMembershipSession = (event) => {
     event.preventDefault();
+    if (closedDates.includes(businessDate)) { showNotice('The current working day is closed. Membership sessions cannot be used.', 'error'); return; }
+    if (redeemForm.appointmentId && receiptEntries.some((entry) => entry.appointmentId === redeemForm.appointmentId && !entry.deleted && isMemberSession(entry))) { showNotice('This appointment already has a membership visit receipt.', 'error'); return; }
+    if (!services.some((service) => service.name === redeemForm.service) || !staffList.some((staff) => staff.name === redeemForm.staff)) { showNotice('Choose a valid service and staff member.', 'error'); return; }
     const membership = memberships.find((item) => item.id === redeemForm.membershipId);
     if (!membership || !canRedeemSession(membership)) { showNotice('This membership cannot redeem a session.', 'error'); return; }
     const remainingAfter = membership.sessions - membership.usedSessions - 1;
     const receiptId = `membership-session-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const visit = {
-      id: Date.now(),
+      id: `visit-${receiptId}`,
       receiptId,
+      appointmentId: redeemForm.appointmentId,
       membershipId: membership.id,
       memberId: membership.memberId,
       name: membership.name,
@@ -1415,6 +1418,8 @@ function App() {
     };
     const sessionReceipt = {
       id: receiptId,
+      appointmentId: redeemForm.appointmentId,
+      visitId: visit.id,
       number: allocateReceiptNumber(),
       date: businessDate,
       client: membership.name,
@@ -1429,6 +1434,7 @@ function App() {
       memberId: membership.memberId,
       sessionNumber: visit.sessionNumber,
       sessionsTotal: membership.sessions,
+      membershipStatus: 'Membership Session Used',
       staff: redeemForm.staff,
       price: 0,
       method: 'Member',
@@ -1457,6 +1463,73 @@ function App() {
     showNotice(`Session used for ${membership.name} — ${remainingAfter} remaining. No charge, no towel cash.`);
   };
   const currentActiveMemberships = memberships.filter((membership) => canRedeemSession(membership));
+  useEffect(() => {
+    if (!stateHydrated) return;
+    const storedReceipts = loadJSON(STORAGE.receiptEntries, []);
+    const missingSales = memberships.filter((membership) => !membership.receiptId && !storedReceipts.some((entry) =>
+      entry.membershipId === membership.id && entry.transactionType === 'New Membership'));
+    const missingVisits = membershipVisits.filter((visit) => !visit.receiptId && !storedReceipts.some((entry) =>
+      entry.id === visit.receiptId || entry.visitId === visit.id));
+    const linkedMemberships = memberships.map((membership) => {
+      const receipt = storedReceipts.find((entry) => entry.membershipId === membership.id && entry.transactionType === 'New Membership');
+      return !membership.receiptId && receipt ? { ...membership, receiptId: receipt.id } : membership;
+    });
+    if (linkedMemberships.some((membership, index) => membership !== memberships[index])) {
+      setMemberships(linkedMemberships);
+      saveJSON(STORAGE.memberships, linkedMemberships);
+    }
+    if (!missingSales.length && !missingVisits.length) return;
+    const saleReceipts = missingSales.map((membership) => {
+      const method = normalizeReceiptMethod(membership.paymentMode);
+      const payment = membership.totalAmount == null ? calculateMembershipPayment(membership.amount, membership.paymentMode) : membership;
+      return {
+        id: `membership-sale-${membership.id}`, number: allocateReceiptNumber(),
+        date: membership.startDate, client: membership.name, phone: membership.phone,
+        membershipId: membership.id, memberId: membership.memberId,
+        service: membership.packageName, packageName: membership.packageName,
+        membership: `${membership.packageName} · ${membership.sessions} sessions`,
+        sessionsTotal: membership.sessions, membershipStatus: getMembershipStatus(membership),
+        transactionType: 'New Membership', method, price: membership.amount,
+        tax: payment.gstRate || 0, taxAmount: payment.gstAmount || 0,
+        total: payment.totalAmount, towelKit: 0, memberFee: 0,
+        ...splitReceiptPayment(method, membership.amount, payment.gstAmount || 0),
+        notes: membership.notes || '', deleted: false
+      };
+    });
+    const visitReceipts = missingVisits.map((visit) => {
+      const membership = memberships.find((item) => item.id === visit.membershipId);
+      return {
+        id: visit.receiptId || `membership-visit-${visit.id}`, visitId: visit.id,
+        number: allocateReceiptNumber(), date: visit.date,
+        client: visit.name, phone: visit.phone, membershipId: visit.membershipId,
+        memberId: visit.memberId || membership?.memberId, packageName: visit.packageName,
+        membership: `${visit.packageName} · ${membership?.sessions || ''} sessions`,
+        sessionsTotal: membership?.sessions, sessionNumber: visit.sessionNumber,
+        membershipStatus: 'Membership Session Used', transactionType: 'Membership Session',
+        method: 'Member', price: 0, total: 0, tax: 0, taxAmount: 0, memberFee: 0, towelKit: 0,
+        ...splitReceiptPayment('Member', 0, 0), service: visit.service,
+        duration: services.find((service) => service.name === visit.service)?.duration || '',
+        staff: visit.staff, inTime: visit.time, notes: visit.notes || '', deleted: false
+      };
+    });
+    // Historical activity already contributed to its ledger and session balance.
+    // Repair only missing receipt links, including legacy records, without charging again.
+    persistReceiptEntries([...saleReceipts, ...visitReceipts, ...storedReceipts]);
+    if (saleReceipts.length) {
+      const migratedMemberships = linkedMemberships.map((membership) => {
+        const receipt = saleReceipts.find((entry) => entry.membershipId === membership.id);
+        return receipt ? { ...membership, receiptId: receipt.id } : membership;
+      });
+      setMemberships(migratedMemberships);
+      saveJSON(STORAGE.memberships, migratedMemberships);
+    }
+    const linkedVisits = membershipVisits.map((visit) => {
+      const receipt = visitReceipts.find((entry) => entry.visitId === visit.id);
+      return receipt ? { ...visit, receiptId: receipt.id } : visit;
+    });
+    setMembershipVisits(linkedVisits);
+    saveJSON(STORAGE.membershipVisits, linkedVisits);
+  }, [stateHydrated, memberships, membershipVisits, receiptEntries]);
   const filteredMemberships = currentActiveMemberships.filter((membership) => {
     const query = membershipSearch.toLowerCase().trim();
     if (!query) return true;
@@ -1581,7 +1654,7 @@ function App() {
 
   const dayIsClosed = closedDates.includes(businessDate);
   const dayReportAppointments = appointmentsList.filter((item) => item.date === dayReportDate);
-  const dayReportReceipts = receiptEntries.filter((item) => item.date === dayReportDate).map(toReceiptRow);
+  const dayReportReceipts = receiptEntries.filter((item) => item.date === dayReportDate).map(toReceiptDisplayRow);
   const dayReportExpenses = dailyExpenses.filter((item) => item.date === dayReportDate);
   const dayReportMemberships = memberships.filter((item) => item.startDate === dayReportDate);
   const dayReportVisits = membershipVisits.filter((item) => item.date === dayReportDate);
@@ -1602,14 +1675,13 @@ function App() {
   const deletedReceiptRows = toReceiptGridRows(deletedDayReceipts);
   const deletedReceiptCount = deletedDayReceipts.length;
   const todaysReceiptRows = activeDayReceipts.map(toReceiptRow);
-  // Sessions redeemed from the membership lookup panel have no receipt but are still visits.
-  const walkInMemberVisits = membershipVisits.filter((visit) => visit.date === businessDate && !visit.receiptId).length;
-  const todaysMemberReceipts = todaysReceiptRows.filter((row) => row.method === 'Member').length;
+  const todaysSummary = summarizeTransactions(businessDate, receiptEntries, membershipVisits);
+  const todaysMemberReceipts = todaysReceiptRows.filter(isMemberSession).length;
   const todaysBreakdown = todaysReceiptRows.reduce((totals, row) => {
-    const bucket = receiptRevenueBucket(row.method);
+    const bucket = isMemberSession(row) ? 'Member' : receiptRevenueBucket(row.method);
     return { ...totals, [bucket]: totals[bucket] + (bucket === 'Member' ? 0 : row.price + row.taxAmount) };
   }, { GPay: 0, Cash: 0, Card: 0, Member: 0 });
-  const todaysRevenue = todaysBreakdown.GPay + todaysBreakdown.Cash + todaysBreakdown.Card;
+  const todaysRevenue = todaysSummary.totalCollection;
   const receiptEditingEntry = editingReceiptId ? receiptEntries.find((item) => item.id === editingReceiptId) : null;
   const receiptMemberLookup = showReceiptForm && receiptFormIsMember ? resolveReceiptMembership(receiptForm, receiptEditingEntry) : null;
   const changeReceiptPaymentMode = () => {
@@ -1628,10 +1700,11 @@ function App() {
     if (lookup.state === 'needs-client') return <div className="rx-member-panel is-info" role="status"><div className="rx-member-head"><h4><Info size={15} strokeWidth={2} aria-hidden="true" />Membership Details</h4></div><p className="rx-member-note">Enter the client's 10-digit phone number (or exact name) to load their membership.</p></div>;
     const membership = lookup.membership;
     const actions = <div className="rx-member-actions"><button type="button" className="secondary-button small" onClick={changeReceiptPaymentMode}>Change Payment Mode</button><button type="button" className="secondary-button small rx-with-icon" onClick={createMembershipFromReceipt}><UserPlus size={14} strokeWidth={2} aria-hidden="true" />{membership ? 'Renew Membership' : 'Create Membership'}</button></div>;
-    if (lookup.state === 'none') return <div className="rx-member-panel is-warning" role="alert"><div className="rx-member-head"><h4><AlertCircle size={15} strokeWidth={2} aria-hidden="true" />No active membership found for this client.</h4></div><p className="rx-member-note">Change the payment mode to GPay, Cash or Card, or create a membership first.</p>{actions}</div>;
+    if (lookup.state === 'none' || lookup.state === 'ambiguous') return <div className="rx-member-panel is-warning" role="alert"><div className="rx-member-head"><h4><AlertCircle size={15} strokeWidth={2} aria-hidden="true" />{memberLookupErrors[lookup.state]}</h4></div><p className="rx-member-note">Verify the client phone number, change the payment mode to GPay, Cash or Card, or create a membership first.</p>{actions}</div>;
     const used = membership.usedSessions || 0;
     const valid = lookup.state === 'ready' || lookup.state === 'already-redeemed';
-    const details = <dl className="rx-member-grid">{[['Client', membership.name], ['Package', `${membership.packageName} · ${membership.sessions} Sessions`], ['Package Amount', money(membership.amount)], ['Purchased', formatMemberDate(membership.startDate)], ['Sessions Used', `${used} / ${membership.sessions}`], ['Sessions Remaining', membership.sessions - used], ['Valid Until', formatMemberDate(membership.expiryDate)], ['Status', getMembershipStatus(membership)]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd title={String(value)}>{value}</dd></div>)}</dl>;
+    const status = { ready: 'Active', exhausted: 'Sessions Completed', expired: 'Expired', cancelled: 'Cancelled', 'not-started': 'Not Started' }[receiptMembershipState(membership, businessDate)];
+    const details = <dl className="rx-member-grid">{[['Client', membership.name], ['Package', `${membership.packageName} · ${membership.sessions} Sessions`], ['Package Amount', money(membership.amount)], ['Purchased', formatMemberDate(membership.startDate)], ['Sessions Used', `${used} / ${membership.sessions}`], ['Sessions Remaining', Math.max(0, membership.sessions - used)], ['Valid Until', formatMemberDate(membership.expiryDate)], ['Status', status]].map(([label, value]) => <div key={label}><dt>{label}</dt><dd title={String(value)}>{value}</dd></div>)}</dl>;
     if (!valid) return <div className="rx-member-panel is-warning" role="alert"><div className="rx-member-head"><h4><AlertCircle size={15} strokeWidth={2} aria-hidden="true" />{memberLookupErrors[lookup.state]}</h4><span className="rx-member-id">{membership.memberId}</span></div>{details}<p className="rx-member-note">Select another payment mode, or renew the membership before recording this visit as Member.</p>{actions}</div>;
     return <div className="rx-member-panel is-active" role="status" aria-live="polite"><div className="rx-member-head"><h4>Membership Details</h4><span className="rx-member-badge"><Check size={12} strokeWidth={2.6} aria-hidden="true" />{lookup.state === 'ready' ? 'Active Membership' : 'Membership Visit'}</span><span className="rx-member-id">{membership.memberId}</span></div>{details}<div className="rx-member-callout"><strong>{lookup.state === 'ready' ? 'This visit will use' : 'This visit uses'} Session {lookup.sessionNumber} of {membership.sessions}</strong><span><Info size={14} strokeWidth={2} aria-hidden="true" />{lookup.state === 'ready' ? '1 membership session will be deducted from this visit.' : 'This visit\'s session is already deducted — saving changes will not deduct another.'}</span></div></div>;
   };
@@ -1650,24 +1723,21 @@ function App() {
       const currency = '"₹"#,##0.00';
       const centered = { horizontal: 'center', vertical: 'middle' };
       sheet.columns = [
-        { header: 'Date', key: 'date', width: 13, style: { numFmt: 'dd-mmm-yyyy', alignment: centered } },
-        { header: 'Client Name', key: 'client', width: 26 },
-        { header: 'Phone Number', key: 'phone', width: 15, style: { alignment: centered } },
-        { header: 'Duration', key: 'duration', width: 11, style: { alignment: centered } },
-        { header: 'Service', key: 'service', width: 24 },
-        { header: 'Membership', key: 'membership', width: 15, style: { alignment: centered } },
-        { header: 'Transaction Type', key: 'transactionType', width: 22 },
-        { header: 'Session Number', key: 'sessionNumber', width: 15, style: { alignment: centered } },
+        { header: 'Date', key: 'date', width: 13, style: { numFmt: 'dd-mm-yyyy', alignment: centered } },
+        { header: 'Client', key: 'client', width: 20 },
+        { header: 'Phone', key: 'phone', width: 13, style: { alignment: centered } },
+        { header: 'Dur.', key: 'duration', width: 9, style: { alignment: centered } },
+        { header: 'Member', key: 'membership', width: 22 },
         { header: 'Price', key: 'price', width: 13, style: { numFmt: currency } },
-        { header: 'Payment Mode', key: 'method', width: 15 },
+        { header: 'Payment', key: 'method', width: 15 },
         { header: 'Tax', key: 'tax', width: 12, style: { numFmt: currency } },
-        { header: 'Staff Name', key: 'staff', width: 18 },
-        { header: 'Towel Kit Cash Out', key: 'towelKit', width: 19, style: { numFmt: currency } },
+        { header: 'Staff', key: 'staff', width: 15 },
+        { header: 'Towel', key: 'towelKit', width: 12, style: { numFmt: currency } },
         { header: 'Notes', key: 'notes', width: 36, style: { alignment: { wrapText: true, vertical: 'top' } } }
       ];
       activeReceiptRows.forEach((row) => {
         const [year, month, day] = row.date.split('-').map(Number);
-        sheet.addRow({ date: new Date(Date.UTC(year, month - 1, day)), client: row.client, phone: row.phone, duration: row.duration, service: row.service, membership: row.membership, transactionType: row.transactionType, sessionNumber: row.sessionNumber, price: row.price, method: row.method, tax: row.taxAmount, staff: row.staff, towelKit: row.towelKit, notes: row.notes });
+        sheet.addRow({ date: new Date(Date.UTC(year, month - 1, day)), client: row.client, phone: row.phone, duration: row.duration, membership: receiptRegisterMembership(row), price: row.price, method: receiptRegisterPayment(row), tax: row.taxAmount, staff: row.staff, towelKit: row.towelKit, notes: receiptRegisterNotes(row) });
       });
       const edge = { style: 'thin', color: { argb: 'FFE2DEE6' } };
       sheet.eachRow((sheetRow, rowNumber) => sheetRow.eachCell({ includeEmpty: true }, (cell) => {
@@ -1706,13 +1776,13 @@ function App() {
     const locked = closedDates.includes(row.date);
     return <tr key={row.id} className={locked ? 'rx-locked' : ''}>{receiptColumns.map(([key, , kind]) => {
       const value = receiptCellValue(row, key);
-      return <td key={key} className={kind === 'num' ? 'rx-num' : kind === 'date' ? 'rx-date' : ''} title={receiptCellTitle(row, key, value)}>{receiptCellContent(row, key, value)}</td>;
+      return <td key={key} className={kind === 'num' ? 'rx-num' : kind === 'date' ? 'rx-date' : key === 'notes' ? 'rx-notes' : ''} title={receiptCellTitle(row, key, value)}>{receiptCellContent(row, key, value)}</td>;
     })}<td className="rx-actions">{deletedMode ? <><button type="button" className="rx-icon-button" onClick={() => restoreReceipt(row.id)} disabled={locked} title={locked ? 'Day closed — cannot restore' : 'Restore'} aria-label={`Restore ${row.number}`}><RotateCcw size={14} strokeWidth={2} /></button>{isAdminUser && <button type="button" className="rx-icon-button rx-danger" onClick={() => setReceiptConfirm({ id: row.id, permanent: true })} title="Delete permanently" aria-label={`Delete ${row.number} permanently`}><Trash2 size={14} strokeWidth={2} /></button>}</> : locked ? <span className="rx-lock" title="Day closed — locked"><Lock size={13} strokeWidth={2} aria-label="Locked" /></span> : <><button type="button" className="rx-icon-button" onClick={() => openEditReceipt(row.id)} title="Edit" aria-label={`Edit ${row.number}`}><Pencil size={14} strokeWidth={2} /></button><button type="button" className="rx-icon-button rx-danger" onClick={() => setReceiptConfirm({ id: row.id, permanent: false })} title="Delete" aria-label={`Delete ${row.number}`}><Trash2 size={14} strokeWidth={2} /></button></>}</td></tr>;
-  })}</tbody>{!deletedMode && rows.length > 0 && <tfoot><tr><th colSpan={7}>Total · {rows.length} {rows.length === 1 ? 'receipt' : 'receipts'}</th><th className="rx-num">{money(rows.reduce((total, row) => total + row.price, 0))}</th><th /><th className="rx-num">{money(rows.reduce((total, row) => total + row.taxAmount, 0))}</th><th /><th className="rx-num">{money(rows.reduce((total, row) => total + row.towelKit, 0))}</th><th colSpan={2} /></tr></tfoot>}</table></div>;
+  })}</tbody>{!deletedMode && rows.length > 0 && <tfoot><tr>{receiptColumns.map(([key], index) => index === 0 ? <th key={key}>Total · {rows.length}</th> : ['price', 'taxAmount', 'towelKit'].includes(key) ? <th key={key} className="rx-num">{money(rows.reduce((total, row) => total + row[key], 0))}</th> : <th key={key} />)}<th /></tr></tfoot>}</table></div>;
   const todayExpenses = dailyExpenses.filter((item) => item.date === businessDate);
   const todayExpenseTotal = todayExpenses.reduce((total, item) => total + item.amount, 0);
   const todayAppointments = appointmentsList.filter((item) => item.date === businessDate);
-  const todayVisitCount = todaysReceiptRows.length + walkInMemberVisits;
+  const todayVisitCount = todaysSummary.totalReceipts;
   const todayDashboardPayments = todaysReceiptRows.slice(0, 5).map((row) => [formatGridDate(row.date), row.number, row.client, row.service, money(row.total), row.method]);
   const visibleNav = userRole === 'Frontdesk' ? frontdeskNavItems : navItems;
 
@@ -1727,7 +1797,7 @@ function App() {
   const metricData = [
     ["Today's Appointments", String(todayAppointments.length), `${todayAppointments.filter((item) => item.status === 'Completed').length} completed`, 'violet'],
     ["Today's Revenue", money(todaysRevenue), 'Payments collected today', 'ink'],
-    ["Today's Visits", String(todayVisitCount), `${todaysMemberReceipts + walkInMemberVisits} member visits`, 'gold'],
+    ["Today's Visits", String(todayVisitCount), `${todaysSummary.membershipSessionsUsed} member visits`, 'gold'],
     ["Today's Expenses", money(todayExpenseTotal), `${todayExpenses.length} expense records`, 'rose']
   ];
 
@@ -1735,7 +1805,7 @@ function App() {
     <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
       <div className="brand-wrap"><div className="brand-mark">{privacyActive ? 'B' : businessProfile.name[0] || 'B'}</div><div className="brand-copy"><div className="brand-title">{privacyActive ? 'Hidden' : businessProfile.name}</div><div className="brand-subtitle">{privacyActive ? '' : businessProfile.tagline}</div></div><button type="button" className="sidebar-toggle" onClick={() => setSidebarCollapsed((collapsed) => !collapsed)} aria-label={sidebarCollapsed ? 'Expand navigation' : 'Collapse navigation'}>{sidebarCollapsed ? <ChevronRight size={15} strokeWidth={2} /> : <ChevronLeft size={15} strokeWidth={2} />}</button></div>
       <nav className="nav" aria-label="Primary navigation">{visibleNav.map(([label, icon, kind]) => { if (kind === 'section') return <div key={label} className="nav-section-label">{label}</div>; const route = routeFor(label); const NavIcon = navIconComponents[label]; return <button key={label} className={`nav-item ${kind === 'sub' ? 'nav-item-sub' : ''} ${(privacyPage || page) === route ? 'active' : ''}`} onClick={() => privacyActive ? setPrivacyPage(route) : setPage(route)} title={label}><span>{NavIcon ? <NavIcon size={17} strokeWidth={1.8} aria-hidden="true" /> : icon}</span>{label}</button>; })}</nav>
-      <div className="sidebar-footer">{userRole === 'Frontdesk' ? <><span>Working date</span><strong>{formatDisplayDate(businessDate)}</strong><button type="button" className="close-day-button" onClick={closeBusinessDay} disabled={dayIsClosed}>Close day</button></> : <><span className="status-dot" /> Open today <strong>{formatTime12h(businessProfile.openTime)} - {formatTime12h(businessProfile.closeTime)}</strong></>}</div>
+      <div className="sidebar-footer">{userRole === 'Frontdesk' ? <><span>Working date</span><strong>{formatDisplayDate(businessDate)}</strong><button type="button" className="close-day-button" onClick={() => closeBusinessDay()} disabled={dayIsClosed}>Close day</button></> : <><span className="status-dot" /> Open today <strong>{formatTime12h(businessProfile.openTime)} - {formatTime12h(businessProfile.closeTime)}</strong></>}</div>
     </aside>
 
     <main className="main-panel">
@@ -2050,7 +2120,7 @@ function App() {
           </div>
         </div>
       </section> : page === 'Expenditure' ? <section className="expenditure-page">
-        <div className="receipt-page-header"><div><p className="panel-kicker">Finance</p><h2>Payments</h2><p className="page-intro">{formatDisplayDate(businessDate)}. Add today's payments below; closed days move to Monthly Report.</p></div><div className="daily-header-actions"><span className="form-status">{dayIsClosed ? 'Closed' : 'Open'}</span><button type="button" className="primary-button" onClick={closeBusinessDay} disabled={dayIsClosed}>Close day</button></div></div>
+        <div className="receipt-page-header"><div><p className="panel-kicker">Finance</p><h2>Payments</h2><p className="page-intro">{formatDisplayDate(businessDate)}. Add today's payments below; closed days move to Monthly Report.</p></div><div className="daily-header-actions"><span className="form-status">{dayIsClosed ? 'Closed' : 'Open'}</span><button type="button" className="primary-button" onClick={() => closeBusinessDay()} disabled={dayIsClosed}>Close day</button></div></div>
         <form className="receipt-layout" onSubmit={addDailyExpense}>
           <fieldset className="receipt-form-column unified-receipt-panel" disabled={dayIsClosed}>
             <section className="panel receipt-section"><div className="panel-header"><div><p className="panel-kicker">New payment</p><h2>Payment details</h2></div><span className="form-status">{businessDate}</span></div><div className="form-grid"><label>Amount (₹)<input type="number" min="1" value={expenseForm.amount} onChange={(event) => setExpenseForm({ ...expenseForm, amount: event.target.value })} placeholder="0" required /></label><label className="notes-field">Payment description<input value={expenseForm.narration} onChange={(event) => setExpenseForm({ ...expenseForm, narration: event.target.value })} placeholder="e.g. Water bottles" required /></label><label>Mode<select value={expenseForm.source} onChange={(event) => setExpenseForm({ ...expenseForm, source: event.target.value })}><option>Cash</option><option>Card</option><option>GPay</option></select></label></div></section>
@@ -2112,13 +2182,17 @@ function App() {
           <aside className="receipt-preview appointment-preview"><div className="preview-top"><span className="preview-logo">{businessProfile.name[0] || 'B'}</span><div><strong>{businessProfile.name}</strong><span>Manager</span></div><span className="preview-label">{savedAppointment ? 'BOOKED' : 'PREVIEW'}</span></div><div className="preview-divider" /><div className="preview-heading"><div><p className="panel-kicker">Appointment</p><h3>{savedAppointment?.id || 'APT-1048'}</h3></div><span>{appointment.date}</span></div><div className="preview-client"><span>Client</span><strong>{appointment.client || 'Client name'}</strong><small>{appointment.phone || 'Phone number'}</small></div><div className="appointment-summary-block"><div><span className="summary-icon">◷</span><div><small>Date &amp; time</small><strong>{appointment.date} at {formatTime12h(appointment.time)}</strong></div></div><div><span className="summary-icon">✦</span><div><small>Service</small><strong>{appointment.service} · {appointment.duration}</strong></div></div><div><span className="summary-icon">♙</span><div><small>Therapist</small><strong>{appointment.staff}</strong></div></div></div><p className="preview-thanks">A calm visit starts with a clear plan.</p>{savedAppointment && <button type="button" className="secondary-button print-button" onClick={() => window.print()}>Print appointment</button>}</aside>
         </div>
       </form> : page === 'Receipts' ? <section className="receipt-page">
-        <div className="receipt-page-header rx-page-header"><div><h2>Receipts</h2><p className="page-intro">Manage, track and organize all customer payments and receipt records.</p></div><div className="rx-header-actions"><span className={`rx-day-status ${dayIsClosed ? 'closed' : ''}`} title="Working date">{dayIsClosed ? <Lock size={12} strokeWidth={2} aria-hidden="true" /> : <span className="rx-live-dot" aria-hidden="true" />}{formatDisplayDate(businessDate)} · {dayIsClosed ? 'Closed' : 'Open'}</span><button type="button" className="secondary-button" onClick={closeBusinessDay} disabled={dayIsClosed}>Close day</button><button type="button" className="primary-button rx-with-icon" onClick={openAddReceipt}><Plus size={16} strokeWidth={2.2} aria-hidden="true" />Add Receipt</button></div></div>
+        <div className="receipt-page-header rx-page-header"><div><h2>Receipts</h2><p className="page-intro">All working-day payments and membership visits. Membership sessions collect ₹0.</p></div><div className="rx-header-actions"><span className={`rx-day-status ${dayIsClosed ? 'closed' : ''}`} title="Working date">{dayIsClosed ? <Lock size={12} strokeWidth={2} aria-hidden="true" /> : <span className="rx-live-dot" aria-hidden="true" />}{formatDisplayDate(businessDate)} · {dayIsClosed ? 'Closed' : 'Open'}</span><button type="button" className="secondary-button" onClick={() => closeBusinessDay()} disabled={dayIsClosed}>Close day</button><button type="button" className="primary-button rx-with-icon" onClick={openAddReceipt}><Plus size={16} strokeWidth={2.2} aria-hidden="true" />Add Receipt</button></div></div>
         <section className="rx-summary" aria-label="Today's summary">
           <div className="rx-summary-stats">
-            <div><span>Today's Visits</span><strong>{todaysReceiptRows.length + walkInMemberVisits}</strong></div>
+            <div><span>Today's Visits</span><strong>{todaysReceiptRows.length}</strong></div>
             <div><span>Paid Visits</span><strong>{todaysReceiptRows.length - todaysMemberReceipts}</strong></div>
-            <div><span>Member Visits</span><strong>{todaysMemberReceipts + walkInMemberVisits}</strong></div>
+            <div><span>Member Visits</span><strong>{todaysSummary.membershipSessionsUsed}</strong></div>
             <div className="rx-summary-revenue"><span>Today's Revenue</span><strong>{money(todaysRevenue)}</strong></div>
+            <div><span>Total Clients</span><strong>{todaysSummary.totalClientsServed}</strong></div>
+            <div><span>Paid Clients</span><strong>{todaysSummary.regularPaidClients}</strong></div>
+            <div><span>Membership Clients</span><strong>{todaysSummary.membershipClientsServed}</strong></div>
+            <div><span>New Memberships</span><strong>{todaysSummary.newMembershipsSold}</strong></div>
           </div>
           <div className="rx-summary-breakdown" aria-label="Payment breakdown">{['GPay', 'Cash', 'Card', 'Member'].map((mode) => <div key={mode} className={`rx-pay-${mode.toLowerCase()}`}><span className="rx-pay">{mode}</span><strong>{money(todaysBreakdown[mode])}</strong></div>)}</div>
         </section>
@@ -2126,6 +2200,7 @@ function App() {
           <label className="rx-search"><Search size={15} strokeWidth={2} aria-hidden="true" /><span className="sr-only">Search receipts</span><input type="search" value={receiptSearch} onChange={(event) => setReceiptSearch(event.target.value)} placeholder="Search client, phone, service, notes…" /></label>
           <div className="rx-filters" role="group" aria-label="Filters">
             <span className="rx-filters-label"><Filter size={13} strokeWidth={2} aria-hidden="true" />Filter</span>
+            <label className="rx-filter rx-date-filter" title="Receipts show the current working day. Previous dates are available in Settings → Day Report."><span className="sr-only">Receipt working date</span><input type="date" value={businessDate} readOnly aria-readonly="true" /></label>
             <label className="rx-filter"><span className="sr-only">Payment mode</span><select value={receiptMethodFilter} onChange={(event) => setReceiptMethodFilter(event.target.value)}><option value="All">All payments</option>{receiptPaymentModes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
             <label className="rx-filter"><span className="sr-only">Staff</span><select value={receiptStaffFilter} onChange={(event) => setReceiptStaffFilter(event.target.value)}><option value="All">All staff</option>{staffList.map((member) => <option key={member.id}>{member.name}</option>)}</select></label>
             {receiptFiltersActive && <button type="button" className="rx-text-button" onClick={clearReceiptFilters}><X size={13} strokeWidth={2.2} aria-hidden="true" />Clear</button>}
@@ -2133,7 +2208,7 @@ function App() {
           <button type="button" className="secondary-button rx-with-icon rx-export" onClick={exportReceiptsXlsx} disabled={exportingReceipts || !activeReceiptRows.length}><Download size={15} strokeWidth={2} aria-hidden="true" />{exportingReceipts ? 'Exporting…' : 'Export XLSX'}</button>
         </div>
         <section className="panel rx-panel">
-          <div className="rx-panel-head"><div><h3>Active Receipts</h3><span className="rx-count">{receiptFiltersActive ? `${activeReceiptRows.length} of ${activeDayReceipts.length}` : activeDayReceipts.length} {activeDayReceipts.length === 1 ? 'record' : 'records'}</span></div></div>
+          <div className="rx-panel-head"><div><h3>All Visit &amp; Payment Activity</h3><span className="rx-count">{receiptFiltersActive ? `${activeReceiptRows.length} of ${activeDayReceipts.length}` : activeDayReceipts.length} {activeDayReceipts.length === 1 ? 'record' : 'records'} · Paid visits and membership sessions together</span></div></div>
           {activeReceiptRows.length ? renderReceiptSheet(activeReceiptRows, false) : activeDayReceipts.length ? renderReceiptEmpty('No matching receipts', 'Try a different search term or clear the filters.') : renderReceiptEmpty('No receipts yet', 'Click “Add Receipt” to record your first payment.')}
         </section>
         <section className="panel rx-panel rx-deleted-panel">
@@ -2149,17 +2224,17 @@ function App() {
               <label>Phone Number<input type="tel" value={receiptForm.phone} onChange={(event) => updateReceiptForm('phone', sanitizePhone(event.target.value))} placeholder="9876543210" inputMode="numeric" maxLength={10} /></label>
               <div className="rx-duration-group"><span className="rx-group-label">Duration *</span><div className="rx-duration-fields"><label>Start hour<select value={getAppointmentTimeParts(receiptForm.time).hour} onChange={(event) => updateReceiptFormTime('hour', event.target.value)}>{appointmentHours.map((hour) => <option key={hour}>{hour}</option>)}</select></label><label>Minute<select value={getAppointmentTimeParts(receiptForm.time).minute} onChange={(event) => updateReceiptFormTime('minute', event.target.value)}>{appointmentMinutes.map((minute) => <option key={minute}>{minute}</option>)}</select></label><label>Length<select value={receiptForm.duration} onChange={(event) => updateReceiptForm('duration', event.target.value)}>{[...new Set([...receiptDurations, receiptForm.duration])].map((duration) => <option key={duration}>{duration}</option>)}</select></label></div><small className="rx-hint">{formatTime12h(receiptForm.time)} – {formatTime12h(calculateOutTime(receiptForm.time, receiptForm.duration))}</small></div>
               <label>Service *<select value={receiptForm.service} onChange={(event) => updateReceiptForm('service', event.target.value)} required>{!services.some((service) => service.name === receiptForm.service) && <option value={receiptForm.service}>{receiptForm.service || 'Select a service'}</option>}{services.map((service) => <option key={service.id}>{service.name}</option>)}</select></label>
-              {receiptFormIsMember ? <label>Price<input className="rx-member-price" value="₹0 – Included in Membership" readOnly aria-readonly="true" tabIndex={-1} /></label> : <label>Price (₹) *<input type="number" min="0" step="1" inputMode="decimal" value={receiptForm.price} onChange={(event) => updateReceiptForm('price', event.target.value)} required /></label>}
-              <label>Payment Mode *<select id="rx-payment-mode" value={receiptForm.method} onChange={(event) => updateReceiptForm('method', event.target.value)} required><option value="" disabled>Select Payment Mode</option>{receiptPaymentModes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
-              <label>Tax (%){(receiptForm.method === 'Cash' || receiptFormIsMember) && <small className="tax-cash-note">{receiptFormIsMember ? ' ₹0 — no payment collected' : ' GST not applicable on cash'}</small>}<input type="number" min="0" max="100" step="0.01" inputMode="decimal" value={receiptForm.method === 'Cash' || receiptFormIsMember ? '0' : receiptForm.tax} onChange={(event) => updateReceiptForm('tax', event.target.value)} disabled={receiptForm.method === 'Cash' || receiptFormIsMember} /></label>
+              <label className="rx-payment-field">Payment Mode *<select id="rx-payment-mode" value={receiptForm.method} onChange={(event) => updateReceiptForm('method', event.target.value)} required><option value="" disabled>Select Payment Mode</option>{receiptPaymentModes.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
               {renderMembershipPanel()}
+              {receiptFormIsMember ? <label>Price<input className="rx-member-price" value="₹0 – Included in Membership" readOnly aria-readonly="true" tabIndex={-1} /></label> : <label>Price (₹) *<input type="number" min="0" step="1" inputMode="decimal" value={receiptForm.price} onChange={(event) => updateReceiptForm('price', event.target.value)} required /></label>}
+              <label>Tax (%){(receiptForm.method === 'Cash' || receiptFormIsMember) && <small className="tax-cash-note">{receiptFormIsMember ? ' ₹0 — no payment collected' : ' GST not applicable on cash'}</small>}<input type="number" min="0" max="100" step="0.01" inputMode="decimal" value={receiptForm.method === 'Cash' || receiptFormIsMember ? '0' : receiptForm.tax} onChange={(event) => updateReceiptForm('tax', event.target.value)} disabled={receiptForm.method === 'Cash' || receiptFormIsMember} /></label>
               <label>Staff Name *<select value={receiptForm.staff} onChange={(event) => updateReceiptForm('staff', event.target.value)} required>{!staffList.some((member) => member.name === receiptForm.staff) && <option value={receiptForm.staff}>{receiptForm.staff || 'Select staff'}</option>}{staffList.map((member) => <option key={member.id}>{member.name}</option>)}</select></label>
               <label>Towel Kit Cash Out (₹)<input type="number" min="0" step="1" inputMode="decimal" value={receiptForm.towelKit} onChange={(event) => updateReceiptForm('towelKit', event.target.value)} /></label>
               <label className="rx-notes-field">Notes<input value={receiptForm.notes} onChange={(event) => updateReceiptForm('notes', event.target.value)} placeholder="Optional" /></label>
             </div>
             <div className="rx-form-summary"><span>Payment <strong>{receiptForm.method || '—'}</strong></span><span>Price <strong>{money(receiptFormPrice)}</strong></span><span>Tax <strong>{money(receiptFormTaxAmount)}</strong></span><span>Total <strong>{money(receiptFormPrice + receiptFormTaxAmount)}</strong></span></div>
             {receiptError && <div className="form-error" role="alert">{receiptError}</div>}
-            <div className="rx-modal-actions"><button type="button" className="secondary-button" onClick={closeReceiptForm}>Cancel</button><button type="submit" className="primary-button">{editingReceiptId ? 'Save Changes' : 'Save Receipt'}</button></div>
+            <div className="rx-modal-actions"><button type="button" className="secondary-button" onClick={closeReceiptForm}>Cancel</button><button type="submit" className="primary-button" disabled={receiptFormIsMember && !['ready', 'already-redeemed'].includes(receiptMemberLookup?.state)}>{editingReceiptId ? 'Save Changes' : 'Save Receipt'}</button></div>
           </form>
         </div>}
         {receiptConfirm && <div className="rx-modal-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setReceiptConfirm(null); }}>
@@ -2306,6 +2381,7 @@ function App() {
                   <tr><td>Membership collection</td><td>{money(report.membershipCollection || 0)}</td></tr>
                   <tr><td>Normal service collection</td><td>{money(report.normalServiceCollection || 0)}</td></tr>
                   <tr><td>₹0 membership visits</td><td>{report.zeroMembershipVisits || 0}</td></tr>
+                  <tr><td>Membership session collection today</td><td>{money(0)}</td></tr>
                   <tr><td>Membership revenue collected today</td><td>{money(report.membershipRevenueToday)}</td></tr>
                 </tbody>
               </table>

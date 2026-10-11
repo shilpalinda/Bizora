@@ -529,6 +529,7 @@ table.rx-sheet { width:100%; min-width:1110px; table-layout:fixed; border-collap
 .rx-modal-head .page-intro { margin-top:4px; font-size:.76rem; }
 .rx-modal-head .rx-icon-button { width:32px; height:32px; }
 .rx-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px 14px; }
+.rx-payment-field { grid-column:1/-1; }
 .rx-form-grid label,.rx-group-label { display:grid; gap:6px; color:#4f4a57; font-size:.7rem; font-weight:600; }
 .rx-form-grid input,.rx-form-grid select { width:100%; min-width:0; height:38px; padding:0 11px; border:1px solid var(--line-strong); border-radius:9px; background:#fff; color:var(--ink); font-size:.8rem; transition:border-color .15s ease,box-shadow .15s ease; }
 .rx-form-grid input:focus,.rx-form-grid select:focus { outline:none; border-color:#bba9ea; box-shadow:var(--ring); }
@@ -812,6 +813,36 @@ table.rx-sheet.at-schedule-sheet { min-width:640px; }
 .rx-type-membership { border-color:#e7d8eb; background:#f5eef7; color:#765581; }
 .rx-type-member { border-color:#ecdbe7; background:#fbf3f8; color:#985d7c; }
 .rx-type-paid { border-color:#e4e9e4; background:#f3f7f3; color:#52735e; }
+.rx-col-sessionsTotal { width:60px; }
+.rx-col-transactionType { width:145px; }
+.rx-col-membershipStatus { width:145px; }
+.rx-transaction-type { white-space:normal; }
+.receipt-page table.rx-sheet { min-width:0; font-size:.68rem; }
+.receipt-page .rx-col-date { width:9%; }
+.receipt-page .rx-col-client { width:9%; }
+.receipt-page .rx-col-phone { width:10%; }
+.receipt-page .rx-col-duration { width:6%; }
+.receipt-page .rx-col-membership { width:10%; }
+.receipt-page .rx-col-price { width:7%; }
+.receipt-page .rx-col-method { width:8%; }
+.receipt-page .rx-col-taxAmount { width:5%; }
+.receipt-page .rx-col-staff { width:7%; }
+.receipt-page .rx-col-towelKit { width:5%; }
+.receipt-page .rx-col-notes { width:17%; }
+.receipt-page .rx-col-actions { width:7%; }
+.receipt-page .rx-sheet th,.receipt-page .rx-sheet td { padding:4px; }
+.receipt-page .rx-sheet thead th { height:34px; padding:0; font-size:.6rem; letter-spacing:.02em; }
+.receipt-page .rx-sort { height:auto; min-height:34px; gap:2px; padding:0 4px; }
+.receipt-page .rx-sort span { white-space:normal; }
+.receipt-page .rx-pay,.receipt-page .rx-member-badge { max-width:100%; padding:3px 4px; font-size:.6rem; white-space:normal; overflow-wrap:anywhere; }
+.receipt-page .rx-sheet .rx-notes { white-space:normal; line-height:1.4; overflow-wrap:anywhere; }
+.receipt-page .rx-sheet .rx-actions { padding:0 2px; }
+.receipt-page .rx-sheet .rx-actions .rx-icon-button { width:calc(50% - 2px); min-width:16px; max-width:26px; }
+.receipt-page .rx-sheet .rx-actions-col { white-space:normal; overflow-wrap:anywhere; }
+.receipt-page .rx-icon-button + .rx-icon-button { margin-left:0; }
+@media (max-width:760px) { .receipt-page table.rx-sheet { min-width:700px; } }
+.rx-date-filter input { width:125px; border:0; background:transparent; color:inherit; font:inherit; }
+.rx-summary-stats > div:nth-child(-n+4) { border-bottom:1px solid var(--line); }
 
 /* Historical day report stays in Settings; operational pages remain date-scoped. */
 .day-report-panel { margin:0 0 18px; }
@@ -891,5 +922,3 @@ table.rx-sheet.day-report-table { min-width:780px; }
   .day-report-summary article:nth-child(-n+4) { border-bottom:1px solid var(--line); }
 }
 .donut { background:conic-gradient(#80608f 0 40%,#b18abf 40% 65%,#d9c5e2 65% 80%,#e7b9ca 80% 90%,#f1eaf3 90%); }
-
-
