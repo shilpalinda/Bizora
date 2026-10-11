@@ -6,3 +6,4 @@ EGMORE_Expenditure_Extracted.xlsx
 .env
 .env.*
 !.env.example
+server/privacy-secrets.json
